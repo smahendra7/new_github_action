@@ -1,0 +1,13 @@
+name: AI PR Automation
+description: Run the AI PR automation
+
+runs:
+  using: composite
+  steps:
+    - name: Install dependencies
+      shell: bash
+      run: pip install -r "${{ github.action_path }}/../../../requirements.txt"
+
+    - name: Run AI PR Automation
+      shell: bash
+      run: python "${{ github.action_path }}/../../../run_action.py"

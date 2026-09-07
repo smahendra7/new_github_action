@@ -27,4 +27,4 @@ jobs:
         uses: boAt-Lifestyle/boat-AI-PR-automation/.github/actions/ai-pr-automation@main
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }} 
