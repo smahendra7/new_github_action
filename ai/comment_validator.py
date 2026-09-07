@@ -210,8 +210,7 @@ def format_comment_validation_failure(mismatches: list[dict]) -> str:
     mismatch_text = "\n\n".join(blocks)
 
     return (
-        "\u274c\n\n"
-        "Comment Validation Failed\n\n"
+        "\u274c **Comment Validation Failed**\n\n"
         f"{mismatch_text}\n\n"
         "Please update the code comment (or fix the code logic) so they match, "
         "then push a new commit to re-trigger the review."
