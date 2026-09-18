@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+requests
+gitpython
+pyjwt
+cryptography
+groq
+python-docx
