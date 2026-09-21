@@ -278,7 +278,7 @@ def process_pr_event(
             "message": "pong"
         }
 
-    if event == "pull_request":
+    if event in ["pull_request", "pull_request_target"]:
 
         pr = payload.get(
             "pull_request",
