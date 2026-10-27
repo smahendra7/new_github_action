@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+requests
+gitpython
+pyjwt
+cryptography
+groq
+openai
+python-docx
+tiktoken
+tree-sitter
+tree-sitter-kotlin
+tree-sitter-swift
