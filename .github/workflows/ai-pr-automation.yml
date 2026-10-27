@@ -3,11 +3,13 @@ name: AI PR Automation
 on:
   workflow_call:
     secrets:
-      GROQ_API_KEY:
+      NVIDIA_API_KEY:
         required: true
+      GROQ_API_KEY:
+        required: false
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
 
 jobs:
@@ -26,5 +28,6 @@ jobs:
       - name: Run AI PR Automation
         uses: boAt-Lifestyle/boat-AI-PR-automation/.github/actions/ai-pr-automation@main
         env:
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          GITHUB_TOKEN: ${{ github.token }} 
+          GITHUB_TOKEN: ${{ github.token }}
