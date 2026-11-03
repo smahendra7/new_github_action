@@ -392,7 +392,7 @@ def validate_description_matches_code(
 
         try:
             completion = client.chat.completions.create(
-                model="mistralai/mistral-large-4-1t-a52b",
+                model="nvidia/nemotron-3-ultra-550b-a55b",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.0,
                 max_tokens=_MAX_OUTPUT_TOKENS,
