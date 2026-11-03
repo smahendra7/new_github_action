@@ -610,10 +610,20 @@ def extract_full_code(
     """
     Read complete source code for the supplied changed files.
 
-    When source_ref is supplied, the content must come from that Git ref.
-    It will not silently fall back to a potentially stale workspace copy.
+    When source_ref is supplied, content must come from that exact Git ref.
+    This function never falls back to a potentially stale workspace copy.
+
+    Extraction is fail-closed: if any requested file cannot be read or
+    formatted, a DiffExtractionError is raised with the exact file paths.
+    Returning partial source would allow the caller to review an incomplete
+    PR while believing the extraction succeeded.
     """
-    if not workspace_path or not changed_files:
+    if not workspace_path:
+        raise DiffExtractionError(
+            "Cannot extract changed-file source: workspace_path is empty."
+        )
+
+    if not changed_files:
         return ""
 
     repo_name = _get_repo_name(repo_name)
@@ -626,89 +636,148 @@ def extract_full_code(
     if not filtered_files:
         return ""
 
-    repo = None
+    # Normalize and de-duplicate without changing the original order.
+    normalized_files = []
+    seen_files = set()
+    for raw_path in filtered_files:
+        rel_path = _normalize_repo_path(raw_path)
+        if not rel_path:
+            raise DiffExtractionError(
+                f"Invalid empty path in changed_files: {raw_path!r}"
+            )
+        if rel_path not in seen_files:
+            normalized_files.append(rel_path)
+            seen_files.add(rel_path)
 
-    if os.path.isdir(os.path.join(workspace_path, ".git")):
+    repo = None
+    git_dir = os.path.join(workspace_path, ".git")
+
+    if os.path.isdir(git_dir) or os.path.isfile(git_dir):
         try:
             repo = Repo(workspace_path)
-
-            if source_ref:
-                for remote in repo.remotes:
-                    if remote.name == "origin":
-                        try:
-                            remote.fetch()
-                        except Exception as exc:
-                            print(
-                                f"[FILE EXTRACTION WARNING] "
-                                f"Git fetch failed: {exc}"
-                            )
-                        break
-
         except Exception as exc:
+            if source_ref:
+                raise DiffExtractionError(
+                    "A source_ref was supplied, but the workspace could "
+                    f"not be opened as a Git repository: {exc}"
+                ) from exc
             print(
-                f"[FILE EXTRACTION WARNING] Could not open Git repository: "
-                f"{exc}"
+                "[FILE EXTRACTION WARNING] Could not open Git repository: "
+                f"{type(exc).__name__}: {exc}"
             )
-            repo = None
 
-    file_blocks = []
-
-    for rel_path in filtered_files:
-        rel_path = _normalize_repo_path(rel_path)
-
-        if not rel_path:
-            print(
-                "[FILE EXTRACTION WARNING] Skipping empty file path."
-            )
-            continue
-
-        content = _read_changed_file_content(
-            repo=repo,
-            workspace_path=workspace_path,
-            rel_path=rel_path,
-            source_ref=source_ref,
+    elif source_ref:
+        raise DiffExtractionError(
+            "A source_ref was supplied, but the workspace has no Git "
+            "repository metadata. Refusing to read a potentially stale "
+            "workspace copy."
         )
 
-        if content is None:
-            print(
-                f"[FILE EXTRACTION WARNING] Could not read "
-                f"{rel_path} from the requested source."
-            )
-            continue
+    if source_ref and repo is not None:
+        # Fetch the requested commit/ref when possible. Fetch failure is
+        # diagnostic only; the exact source_ref lookup below remains strict.
+        for remote in repo.remotes:
+            if remote.name == "origin":
+                try:
+                    remote.fetch()
+                except Exception as exc:
+                    print(
+                        "[FILE EXTRACTION WARNING] Git fetch failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                break
+
+    file_blocks = []
+    extracted_files = []
+    failed_files = []
+
+    print(
+        "[SOURCE EXTRACTION] Attempting to extract "
+        f"{len(normalized_files)} file(s) from "
+        f"{source_ref or 'workspace'}"
+    )
+
+    for rel_path in normalized_files:
+        print(f"[SOURCE EXTRACTION] Reading: {rel_path}")
 
         try:
-            lines = content.splitlines()
+            content = _read_changed_file_content(
+                repo=repo,
+                workspace_path=workspace_path,
+                rel_path=rel_path,
+                source_ref=source_ref,
+            )
 
+            if content is None:
+                failed_files.append(
+                    (rel_path, "file could not be read from requested source")
+                )
+                print(
+                    f"[FILE EXTRACTION ERROR] Could not read {rel_path} "
+                    "from the requested source."
+                )
+                continue
+
+            lines = content.splitlines()
             numbered_lines = [
                 f"L{index}: {line}"
                 for index, line in enumerate(lines, start=1)
             ]
-
             formatted_code = "\n".join(numbered_lines)
 
             extension = os.path.splitext(rel_path)[1].lstrip(".")
             language = extension if extension else "text"
 
-            file_block = (
+            file_blocks.append(
                 f"FILE: {rel_path}\n"
                 f"```{language}\n"
                 f"{formatted_code}\n"
                 "```"
             )
-
-            file_blocks.append(file_block)
+            extracted_files.append(rel_path)
+            print(f"[SOURCE EXTRACTION SUCCESS] {rel_path}")
 
         except Exception as exc:
+            failed_files.append(
+                (rel_path, f"{type(exc).__name__}: {exc}")
+            )
             print(
-                f"[FILE EXTRACTION WARNING] Could not format "
-                f"{rel_path}: {exc}"
+                f"[FILE EXTRACTION ERROR] {rel_path}: "
+                f"{type(exc).__name__}: {exc}"
             )
 
-    if not file_blocks:
-        return ""
+    print("\n===== SOURCE EXTRACTION SUMMARY =====")
+    print(f"Files requested : {len(normalized_files)}")
+    print(f"Files extracted : {len(extracted_files)}")
+    print(f"Files failed    : {len(failed_files)}")
+
+    if failed_files:
+        print("\nFiles that could not be extracted:")
+        for file_path, reason in failed_files:
+            print(f"  - {file_path}: {reason}")
+
+    print("=====================================\n")
+
+    if failed_files:
+        details = "; ".join(
+            f"{file_path} ({reason})"
+            for file_path, reason in failed_files
+        )
+        raise DiffExtractionError(
+            "Incomplete source extraction. "
+            f"Requested {len(normalized_files)} file(s), "
+            f"extracted {len(extracted_files)}, "
+            f"failed {len(failed_files)}: {details}"
+        )
+
+    if len(file_blocks) != len(normalized_files):
+        raise DiffExtractionError(
+            "Source extraction section count mismatch: "
+            f"expected {len(normalized_files)}, "
+            f"created {len(file_blocks)}."
+        )
 
     return "\n\n".join(file_blocks)
-
 
 def _read_changed_file_content(
     repo: Repo | None,
