@@ -25,7 +25,7 @@ from ai.chunk_manager import parse_diff_by_file
 # ---------------------------------------------------------------------------
 
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
-NVIDIA_MODEL = "mistralai/mistral-large-4-1t-a52b"
+NVIDIA_MODEL = "nvidia/nemotron-3-ultra-550b-a55b"
 
 MAX_FALLBACK_CONTEXT_LINES = 15
 
