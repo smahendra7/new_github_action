@@ -994,13 +994,17 @@ def process_pr_event(
             f"{actual_file_sections}"
         )
 
-        if actual_file_sections != expected_file_sections:
-
-            raise RuntimeError(
-                "Incomplete source extraction: "
-                f"expected {expected_file_sections} FILE section(s), "
-                f"but found {actual_file_sections}. "
-                "AI review was stopped."
+        if actual_file_sections < expected_file_sections:
+            print(
+                "[SOURCE EXTRACTION WARNING] Some changed files could not "
+                "be extracted. The review will continue with files whose "
+                "source is available."
+            )
+        elif actual_file_sections > expected_file_sections:
+            print(
+                "[SOURCE EXTRACTION WARNING] More FILE sections were "
+                "extracted than expected. Exact-path matching will be used "
+                "before reviewing any file."
             )
 
         # ---------------------------------------------------
@@ -1023,8 +1027,14 @@ def process_pr_event(
             f"[SOURCE MAP] Parsed {len(parsed_files_map)} file(s)."
         )
 
-        # Verify every changed file has an exact diff entry.
-        missing_diff_files = []
+        # Keep only files that have BOTH an exact diff and an exact source
+        # block. Missing files are recorded and skipped individually; they
+        # must never cause the entire PR review to stop.
+        reviewable_files = []
+        skipped_files = []
+        reviewable_diff_blocks = []
+        reviewable_diff_map = {}
+        reviewable_source_map = {}
 
         for file_path in changed_files:
 
@@ -1032,40 +1042,66 @@ def process_pr_event(
                 parsed_diff_map,
                 file_path,
             )
-
-            if not diff_info:
-                missing_diff_files.append(file_path)
-
-        if missing_diff_files:
-
-            raise RuntimeError(
-                "The following changed files do not have an exact "
-                "matching diff entry: "
-                + ", ".join(missing_diff_files)
-                + ". AI review was stopped to prevent cross-file review."
-            )
-
-        # Verify every changed file has an exact source entry.
-        missing_source_files = []
-
-        for file_path in changed_files:
-
             file_info = _get_exact_path_value(
                 parsed_files_map,
                 file_path,
             )
 
+            if not diff_info:
+                skipped_files.append(
+                    (file_path, "exact file diff was not found")
+                )
+                print(
+                    f"[REVIEW SKIPPED] {file_path}: exact file diff was not found."
+                )
+                continue
+
             if not file_info:
-                missing_source_files.append(file_path)
+                skipped_files.append(
+                    (file_path, "source file could not be extracted")
+                )
+                print(
+                    f"[REVIEW SKIPPED] {file_path}: source file could not be extracted."
+                )
+                continue
 
-        if missing_source_files:
+            file_diff = diff_info.get("full_diff", "")
+            if not file_diff.strip():
+                skipped_files.append(
+                    (file_path, "exact file diff is empty")
+                )
+                print(
+                    f"[REVIEW SKIPPED] {file_path}: exact file diff is empty."
+                )
+                continue
 
-            raise RuntimeError(
-                "The following changed files do not have an exact "
-                "matching source entry: "
-                + ", ".join(missing_source_files)
-                + ". AI review was stopped."
+            reviewable_files.append(file_path)
+            reviewable_diff_map[file_path] = diff_info
+            reviewable_source_map[file_path] = file_info
+            reviewable_diff_blocks.append(file_diff)
+
+        if skipped_files:
+            print("\n===== FILES SKIPPED FROM AI REVIEW =====")
+            for skipped_path, reason in skipped_files:
+                print(f"  - {skipped_path}: {reason}")
+            print(
+                f"[SOURCE EXTRACTION WARNING] Skipped {len(skipped_files)} "
+                f"file(s); continuing with {len(reviewable_files)} reviewable file(s)."
             )
+            print("========================================\n")
+
+        if not reviewable_files:
+            raise RuntimeError(
+                "No changed files had both an exact diff and extractable "
+                "source code. There is no safe source context to send for AI review."
+            )
+
+        # From this point onward, every review operation receives only the
+        # exact files for which both source and diff were successfully found.
+        changed_files = reviewable_files
+        parsed_diff_map = reviewable_diff_map
+        parsed_files_map = reviewable_source_map
+        diff = "\n\n".join(reviewable_diff_blocks)
 
         # ---------------------------------------------------
         # Step 8: Description vs code validation
@@ -1694,6 +1730,18 @@ def process_pr_event(
             comment_warnings=comment_warnings,
         )
 
+        if skipped_files:
+            skipped_summary = [
+                "\n\n### Files Not Reviewed (Source Unavailable)",
+                "The following changed files could not be extracted and were "
+                "skipped. The remaining files were still reviewed:",
+            ]
+            skipped_summary.extend(
+                f"- `{file_path}` — {reason}"
+                for file_path, reason in skipped_files
+            )
+            review = (review or "") + "\n".join(skipped_summary)
+
         combined_comment = _build_combined_comment(
             validation_section=validation_section,
             review_text=review,
@@ -1743,6 +1791,10 @@ def process_pr_event(
             "status": "success",
             "message": "review_completed",
             "changed_files": changed_files,
+            "skipped_files": [
+                {"file": file_path, "reason": reason}
+                for file_path, reason in skipped_files
+            ],
         }
 
     except Exception as error:
