@@ -25,7 +25,7 @@ from ai.chunk_manager import parse_diff_by_file
 # ---------------------------------------------------------------------------
 
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
-NVIDIA_MODEL = "openai/gpt-oss-20b"
+NVIDIA_MODEL = "mistralai/mistral-large-4-1t-a52b"
 
 MAX_FALLBACK_CONTEXT_LINES = 15
 
