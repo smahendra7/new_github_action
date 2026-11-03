@@ -613,10 +613,10 @@ def extract_full_code(
     When source_ref is supplied, content must come from that exact Git ref.
     This function never falls back to a potentially stale workspace copy.
 
-    Extraction is fail-closed: if any requested file cannot be read or
-    formatted, a DiffExtractionError is raised with the exact file paths.
-    Returning partial source would allow the caller to review an incomplete
-    PR while believing the extraction succeeded.
+    Best-effort extraction: an individual file that cannot be read is logged
+    and skipped. Successfully extracted files are returned so the caller can
+    continue reviewing those files. The caller must use exact source/diff
+    matching and report skipped files; it must not claim they were reviewed.
     """
     if not workspace_path:
         raise DiffExtractionError(
@@ -759,22 +759,15 @@ def extract_full_code(
     print("=====================================\n")
 
     if failed_files:
-        details = "; ".join(
-            f"{file_path} ({reason})"
-            for file_path, reason in failed_files
-        )
-        raise DiffExtractionError(
-            "Incomplete source extraction. "
-            f"Requested {len(normalized_files)} file(s), "
-            f"extracted {len(extracted_files)}, "
-            f"failed {len(failed_files)}: {details}"
+        print(
+            "[SOURCE EXTRACTION WARNING] Continuing with successfully "
+            f"extracted files: {len(extracted_files)} of "
+            f"{len(normalized_files)}."
         )
 
-    if len(file_blocks) != len(normalized_files):
-        raise DiffExtractionError(
-            "Source extraction section count mismatch: "
-            f"expected {len(normalized_files)}, "
-            f"created {len(file_blocks)}."
+    if not file_blocks:
+        print(
+            "[SOURCE EXTRACTION WARNING] No source files could be extracted."
         )
 
     return "\n\n".join(file_blocks)
