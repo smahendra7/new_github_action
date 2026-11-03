@@ -79,6 +79,25 @@ def _normalize_path(path: str) -> str:
     return normalized.lstrip("/")
 
 
+# Binary/document assets are not source code and must not be sent to the
+# line-based AI review chunker. PDF files in particular can decode into one
+# enormous line that cannot be subdivided safely.
+_NON_REVIEWABLE_EXTENSIONS = {
+    ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico",
+    ".svgz", ".mp3", ".wav", ".ogg", ".mp4", ".mov", ".avi",
+    ".zip", ".jar", ".aar", ".class", ".so", ".dll", ".dylib",
+    ".ttf", ".otf", ".woff", ".woff2", ".keystore", ".jks",
+}
+
+def _is_reviewable_source_path(path: str) -> bool:
+    """Return False for binary/document assets that are not code-review input."""
+    normalized = _normalize_path(path).lower()
+    filename = normalized.rsplit("/", 1)[-1]
+    dot = filename.rfind(".")
+    extension = filename[dot:] if dot >= 0 else ""
+    return extension not in _NON_REVIEWABLE_EXTENSIONS
+
+
 def _extract_diff_file_path(diff_header: str) -> Optional[str]:
     """
     Extract the destination path from a Git diff header.
@@ -668,14 +687,16 @@ def _subdivide_large_region(
             best_end_index = end_index
 
         if best_end_index == start_index:
-            # A single source line can itself exceed the configured limit.
-            # It cannot be subdivided further, so retain it as one chunk.
-            best_end_index = start_index + 1
-
+            # Never submit an individually oversized line to the model.
+            # Skip that line and continue with the remaining source lines.
+            oversized_line_number = parsed_lines[start_index][0]
             print(
-                f"[CHUNK MANAGER WARNING] A single-line chunk for "
-                f"{file_path} exceeds the configured prompt limit."
+                f"[CHUNK MANAGER WARNING] Skipping oversized single line "
+                f"{oversized_line_number} in {file_path}; it exceeds the "
+                f"configured prompt limit."
             )
+            start_index += 1
+            continue
 
         selected = parsed_lines[start_index:best_end_index]
 
@@ -743,6 +764,30 @@ def create_review_chunks(
 
     if not changed_files:
         return []
+
+    non_reviewable_files = [
+        path for path in changed_files
+        if not _is_reviewable_source_path(path)
+    ]
+    reviewable_changed_files = [
+        path for path in changed_files
+        if _is_reviewable_source_path(path)
+    ]
+
+    for path in non_reviewable_files:
+        print(
+            f"[CHUNK MANAGER] Skipping non-source asset: {path} "
+            "(not sent to AI code review)."
+        )
+
+    if not reviewable_changed_files:
+        print(
+            "[CHUNK MANAGER WARNING] No reviewable source files remain "
+            "after filtering non-source assets."
+        )
+        return []
+
+    changed_files = reviewable_changed_files
 
     parsed_files = parse_full_code_files(full_code)
     parsed_diff = parse_diff_by_file(diff)
@@ -1025,7 +1070,7 @@ def create_review_chunks(
 
     print(
         f"[CHUNK MANAGER] Created {total_chunks} review chunk(s) "
-        f"from {len(changed_files)} supplied changed file(s)."
+        f"from {len(changed_files)} reviewable changed file(s)."
     )
 
     return chunks
