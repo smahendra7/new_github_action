@@ -22,7 +22,7 @@ from groq import Groq
 from openai import OpenAI
 
 _NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
-_NVIDIA_MODEL = "mistralai/mistral-large-4-1t-a52b"
+_NVIDIA_MODEL = "nvidia/nemotron-3-ultra-550b-a55b"
 _GROQ_MODEL      = "openai/gpt-oss-120b"
 _active_model    = _NVIDIA_MODEL   # set by _get_client() on each call
 
