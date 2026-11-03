@@ -32,6 +32,51 @@ AUTOMATION_EXACT_FILES = {
     "procfile",
 }
 
+# Files that are binary assets or compiled artifacts rather than text that
+# can be meaningfully supplied to the AI code reviewer. Keep source-like and
+# configuration files (for example .kt, .java, .xml, .gradle, .json, .md,
+# .yml, .yaml, .properties) eligible for review.
+BINARY_FILE_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".icns",
+    ".heic", ".heif", ".tif", ".tiff",
+    ".pdf",
+    ".mp3", ".wav", ".ogg", ".flac", ".aac", ".m4a",
+    ".mp4", ".mov", ".avi", ".mkv", ".webm",
+    ".ttf", ".otf", ".woff", ".woff2",
+    ".apk", ".aab", ".aar", ".jar", ".class", ".dex",
+    ".so", ".dylib", ".dll", ".exe",
+    ".zip", ".gz", ".tar", ".tgz", ".bz2", ".xz", ".7z", ".rar",
+    ".bin", ".dat", ".db", ".sqlite", ".sqlite3",
+    ".jks", ".keystore",
+}
+
+
+def is_reviewable_text_file(file_path: str) -> bool:
+    """Return whether a changed path is a text file suitable for AI review."""
+    normalized = normalize_repo_path(file_path).lower()
+    if not normalized:
+        return False
+
+    extension = os.path.splitext(normalized)[1]
+    return extension not in BINARY_FILE_EXTENSIONS
+
+
+def filter_reviewable_text_files(file_list: list[str]) -> list[str]:
+    """Keep unique, normalized text files and preserve their original order."""
+    result = []
+    seen = set()
+
+    for file_path in file_list or []:
+        normalized = normalize_repo_path(file_path)
+        if not normalized or normalized in seen:
+            continue
+        if not is_reviewable_text_file(normalized):
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+
+    return result
+
 
 def normalize_repo_path(file_path: str) -> str:
     """Normalize a repository-relative file path."""
