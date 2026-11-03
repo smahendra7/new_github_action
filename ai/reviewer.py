@@ -57,7 +57,7 @@ def review_code_with_status(prompt: str) -> tuple[str, str]:
         ).decode("utf-8")
 
         completion = client.chat.completions.create(
-            model="openai/gpt-oss-20b",
+            model="mistralai/mistral-large-4-1t-a52b",
             messages=[
                 {
                     "role": "user",
