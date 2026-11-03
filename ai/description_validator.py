@@ -206,7 +206,7 @@ Reason: One short sentence
         # )
 
         completion = client.chat.completions.create(
-            model="openai/gpt-oss-20b",
+            model="mistralai/mistral-large-4-1t-a52b",
             messages=[
                 {
                     "role": "user",
