@@ -21,6 +21,7 @@ from github.diff_extractor import (
 from github.changed_files import (
     get_pr_changed_files,
     get_incremental_changed_files,
+    filter_reviewable_text_files,
     ChangedFilesDetectionError,
 )
 
@@ -801,6 +802,16 @@ def process_pr_event(
                     source_branch=source_branch,
                 )
 
+                detected_file_count = len(changed_files or [])
+                changed_files = filter_reviewable_text_files(
+                    changed_files
+                )
+                print(
+                    f"[REVIEWABLE FILES] Incremental diff detected "
+                    f"{detected_file_count} path(s); "
+                    f"{len(changed_files)} text file(s) will be reviewed."
+                )
+
             except ChangedFilesDetectionError as error:
 
                 print(
@@ -844,6 +855,16 @@ def process_pr_event(
                 workspace_path,
                 target_branch,
                 source_branch,
+            )
+
+            detected_file_count = len(changed_files or [])
+            changed_files = filter_reviewable_text_files(
+                changed_files
+            )
+            print(
+                f"[REVIEWABLE FILES] Full PR detected "
+                f"{detected_file_count} path(s); "
+                f"{len(changed_files)} text file(s) will be reviewed."
             )
 
             print("Review Type: FULL PR REVIEW")
