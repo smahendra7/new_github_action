@@ -57,7 +57,7 @@ def review_code_with_status(prompt: str) -> tuple[str, str]:
         ).decode("utf-8")
 
         completion = client.chat.completions.create(
-            model="mistralai/mistral-large-4-1t-a52b",
+            model="nvidia/nemotron-3-ultra-550b-a55b",
             messages=[
                 {
                     "role": "user",
