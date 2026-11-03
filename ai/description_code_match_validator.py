@@ -392,7 +392,7 @@ def validate_description_matches_code(
 
         try:
             completion = client.chat.completions.create(
-                model="openai/gpt-oss-20b",
+                model="mistralai/mistral-large-4-1t-a52b",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.0,
                 max_tokens=_MAX_OUTPUT_TOKENS,
