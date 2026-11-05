@@ -206,7 +206,7 @@ Reason: One short sentence
         # )
 
         completion = client.chat.completions.create(
-            model="nvidia/nemotron-3-ultra-550b-a55b",
+            model="poolside/laguna-xs-2.1",
             messages=[
                 {
                     "role": "user",
