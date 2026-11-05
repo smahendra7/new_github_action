@@ -10,7 +10,7 @@ Configuration constants for AI code review context sizing, token limits, and chu
 SAFE_INPUT_TOKEN_LIMIT: int = 120_000
 
 # Maximum number of concurrent AI requests to NVIDIA NIM.
-MAX_CONCURRENCY: int = 3
+MAX_CONCURRENCY: int = 1
 
 # Number of lines of unchanged context to include above and below each diff hunk.
 CONTEXT_WINDOW_LINES: int = 150
