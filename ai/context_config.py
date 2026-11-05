@@ -13,11 +13,11 @@ SAFE_INPUT_TOKEN_LIMIT: int = 120_000
 MAX_CONCURRENCY: int = 1
 
 # Number of lines of unchanged context to include above and below each diff hunk.
-CONTEXT_WINDOW_LINES: int = 150
+CONTEXT_WINDOW_LINES: int = 50
 
 # Maximum number of lines permitted for an extracted enclosing function/context block.
 # If an enclosing function/method exceeds this limit, only a limited window around the change is sent.
-MAX_CONTEXT_LINES: int = 150
+MAX_CONTEXT_LINES: int = 50
 
 # Fallback context window: lines before and after changed lines when AST parsing fails or function is too large.
 FALLBACK_CONTEXT_WINDOW_LINES: int = 15
