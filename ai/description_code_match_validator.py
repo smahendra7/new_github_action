@@ -392,7 +392,7 @@ def validate_description_matches_code(
 
         try:
             completion = client.chat.completions.create(
-                model="nvidia/nemotron-3-ultra-550b-a55b",
+                model="poolside/laguna-xs-2.1",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.0,
                 max_tokens=_MAX_OUTPUT_TOKENS,
