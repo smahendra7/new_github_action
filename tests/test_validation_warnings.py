@@ -22,6 +22,25 @@ from unittest.mock import patch, MagicMock
 from main import _build_validation_section, _build_combined_comment
 
 
+# Valid fixtures used by process_pr_event integration tests.
+# The production parser requires a real unified Git diff and fenced source code.
+VALID_FOO_DIFF = """diff --git a/app/Foo.kt b/app/Foo.kt
+index 1111111..2222222 100644
+--- a/app/Foo.kt
++++ b/app/Foo.kt
+@@ -1,1 +1,2 @@
+ package app
++// changed
+"""
+
+VALID_FOO_SOURCE = """FILE: app/Foo.kt
+```kotlin
+L1: package app
+L2: // changed
+```
+"""
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # _build_validation_section
 # ─────────────────────────────────────────────────────────────────────────────
@@ -355,12 +374,12 @@ class TestValidationNeverStopsPipeline:
             patch("main.capture_original_reviewers"),
             patch("main.clone_repository", return_value="/tmp/ws"),
             patch("main.get_pr_changed_files", return_value=["app/Foo.kt"]),
-            patch("main.get_diff", return_value="diff text"),
+            patch("main.get_diff", return_value=VALID_FOO_DIFF),
             patch("main.validate_pr_description", return_value=(False, "too vague")),
             patch("main.validate_description_matches_code", return_value=(True, "ok")),
             patch("main.generate_description_suggestion", return_value="Better desc"),
             patch("main.validate_code_comments", return_value=[]),
-            patch("main.extract_full_code", return_value="FILE: app/Foo.kt\nL1: code"),
+            patch("main.extract_full_code", return_value=VALID_FOO_SOURCE),
             patch("main.count_file_sections_in_code", return_value=1),
             patch("main.extract_added_code", return_value=""),
             patch("main.build_review_prompt", return_value="prompt"),
@@ -386,11 +405,11 @@ class TestValidationNeverStopsPipeline:
             patch("main.validate_pr_description", return_value=(True, "ok")),
             patch("main.clone_repository", return_value="/tmp/ws"),
             patch("main.get_pr_changed_files", return_value=["app/Foo.kt"]),
-            patch("main.get_diff", return_value="diff"),
+            patch("main.get_diff", return_value=VALID_FOO_DIFF),
             patch("main.validate_description_matches_code", return_value=(True, "ok")),
             patch("main.validate_code_comments", return_value=[mismatch]),
             patch("main.generate_comment_suggestion", return_value="Correct comment"),
-            patch("main.extract_full_code", return_value="FILE: app/Foo.kt\nL1: code"),
+            patch("main.extract_full_code", return_value=VALID_FOO_SOURCE),
             patch("main.count_file_sections_in_code", return_value=1),
             patch("main.extract_added_code", return_value=""),
             patch("main.build_review_prompt", return_value="prompt"),
@@ -428,12 +447,12 @@ class TestValidationNeverStopsPipeline:
             patch("main.validate_pr_description", return_value=(False, "too vague")),
             patch("main.clone_repository", return_value="/tmp/ws"),
             patch("main.get_pr_changed_files", return_value=["app/Foo.kt"]),
-            patch("main.get_diff", return_value="diff"),
+            patch("main.get_diff", return_value=VALID_FOO_DIFF),
             patch("main.validate_description_matches_code", return_value=(False, "mismatch")),
             patch("main.generate_description_suggestion", return_value="Better desc"),
             patch("main.validate_code_comments", return_value=[mismatch]),
             patch("main.generate_comment_suggestion", return_value="Correct comment"),
-            patch("main.extract_full_code", return_value="FILE: app/Foo.kt\nL1: code"),
+            patch("main.extract_full_code", return_value=VALID_FOO_SOURCE),
             patch("main.count_file_sections_in_code", return_value=1),
             patch("main.extract_added_code", return_value=""),
             patch("main.build_review_prompt", return_value="prompt"),
@@ -478,10 +497,10 @@ class TestValidationNeverStopsPipeline:
             patch("main.validate_pr_description", side_effect=Exception("API down")),
             patch("main.clone_repository", return_value="/tmp/ws"),
             patch("main.get_pr_changed_files", return_value=["app/Foo.kt"]),
-            patch("main.get_diff", return_value="diff"),
+            patch("main.get_diff", return_value=VALID_FOO_DIFF),
             patch("main.validate_description_matches_code", side_effect=Exception("API down")),
             patch("main.validate_code_comments", side_effect=Exception("API down")),
-            patch("main.extract_full_code", return_value="FILE: app/Foo.kt\nL1: code"),
+            patch("main.extract_full_code", return_value=VALID_FOO_SOURCE),
             patch("main.count_file_sections_in_code", return_value=1),
             patch("main.extract_added_code", return_value=""),
             patch("main.build_review_prompt", return_value="prompt"),

@@ -3,7 +3,14 @@ import re
 
 from openai import OpenAI
 
-from ai.context_config import SAFE_INPUT_TOKEN_LIMIT
+from ai.context_config import (
+    SAFE_INPUT_TOKEN_LIMIT,
+    NVIDIA_BASE_URL,
+    NVIDIA_MODEL,
+)
+
+from ai.nvidia_request_lock import execute_nvidia_request
+
 from ai.token_counter import count_tokens
 
 
@@ -371,8 +378,9 @@ def validate_description_matches_code(
 
     try:
         client = OpenAI(
-            base_url="https://integrate.api.nvidia.com/v1",
+            base_url=NVIDIA_BASE_URL,
             api_key=os.environ["NVIDIA_API_KEY"],
+            max_retries=0,
         )
     except Exception as exc:
         print(
@@ -391,13 +399,17 @@ def validate_description_matches_code(
         )
 
         try:
-            completion = client.chat.completions.create(
-                model="poolside/laguna-xs-2.1",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0,
-                max_tokens=_MAX_OUTPUT_TOKENS,
-                top_p=1,
-                stream=False,
+            completion = execute_nvidia_request(
+                lambda: client.chat.completions.create(
+                    model=NVIDIA_MODEL,
+                    messages=[
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.0,
+                    max_tokens=_MAX_OUTPUT_TOKENS,
+                    top_p=1,
+                    stream=False,
+                )
             )
         except Exception as exc:
             print(

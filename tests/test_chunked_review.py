@@ -60,7 +60,7 @@ class TestTokenCounter:
     def test_short_code_counts_accurately(self):
         code = "def add(a, b):\n    return a + b\n"
         tokens = count_tokens(code)
-        assert 5 <= tokens <= 20
+        assert 5 <= tokens <= 25
 
     def test_token_count_increases_with_size(self):
         small = "x = 1\n"

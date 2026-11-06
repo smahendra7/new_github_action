@@ -21,10 +21,16 @@ import re
 from groq import Groq
 from openai import OpenAI
 
-_NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
-_NVIDIA_MODEL = "poolside/laguna-xs-2.1"
-_GROQ_MODEL      = "openai/gpt-oss-120b"
-_active_model    = _NVIDIA_MODEL   # set by _get_client() on each call
+from ai.context_config import (
+    NVIDIA_BASE_URL,
+    NVIDIA_MODEL,
+)
+
+from ai.nvidia_request_lock import execute_nvidia_request
+
+_GROQ_MODEL = "openai/gpt-oss-120b"
+
+_active_model = NVIDIA_MODEL
 
 _MAX_DIFF_CHARS = 8000  # Keep prompts manageable
 
@@ -45,8 +51,12 @@ def _get_client() -> Groq | OpenAI | None:
     global _active_model
     nvidia_key = os.environ.get("NVIDIA_API_KEY")
     if nvidia_key:
-        _active_model = _NVIDIA_MODEL
-        return OpenAI(base_url=_NVIDIA_BASE_URL, api_key=nvidia_key)
+        _active_model = NVIDIA_MODEL
+        return OpenAI(
+            base_url=NVIDIA_BASE_URL,
+            api_key=nvidia_key,
+            max_retries=0,
+        )
 
     # Groq client kept for reference (inactive — switch back by swapping the client above)
     # groq_key = os.environ.get("GROQ_API_KEY")
@@ -103,13 +113,17 @@ no "Here is the suggested description:" prefix. Just the description itself."""
                 "and main changes of this PR."
             )
 
-        completion = client.chat.completions.create(
-            model=_active_model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=300,
-            top_p=1,
-            stream=False,
+        completion = execute_nvidia_request(
+            lambda: client.chat.completions.create(
+                model=_active_model,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,
+                max_tokens=300,
+                top_p=1,
+                stream=False,
+            )
         )
 
         suggestion = (
@@ -180,13 +194,17 @@ Respond with ONLY the corrected comment text."""
         if not client:
             return f"Accurately describes what the code at line {line} does."
 
-        completion = client.chat.completions.create(
-            model=_active_model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-            max_tokens=150,
-            top_p=1,
-            stream=False,
+        completion = execute_nvidia_request(
+            lambda: client.chat.completions.create(
+                model=_active_model,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.2,
+                max_tokens=150,
+                top_p=1,
+                stream=False,
+            )
         )
 
         suggestion = (

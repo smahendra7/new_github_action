@@ -3,6 +3,12 @@ import os
 import threading
 from groq import Groq
 from openai import OpenAI
+from ai.context_config import (
+    NVIDIA_BASE_URL,
+    NVIDIA_MODEL,
+)
+
+from ai.nvidia_request_lock import execute_nvidia_stream
 
 _stdout_lock = threading.Lock()
 
@@ -34,7 +40,7 @@ def review_code_with_status(prompt: str) -> tuple[str, str]:
 
     # NVIDIA OpenAI-compatible client (active provider).
     client = OpenAI(
-        base_url="https://integrate.api.nvidia.com/v1",
+        base_url=NVIDIA_BASE_URL,
         api_key=os.environ["NVIDIA_API_KEY"],
     )
 
@@ -56,19 +62,21 @@ def review_code_with_status(prompt: str) -> tuple[str, str]:
             errors="replace",
         ).decode("utf-8")
 
-        completion = client.chat.completions.create(
-            model="poolside/laguna-xs-2.1",
-            messages=[
-                {
-                    "role": "user",
-                    "content": safe_prompt,
-                }
-            ],
-            temperature=0,
-            max_tokens=4096,
-            top_p=1,
-            reasoning_effort="low",
-            stream=True,
+        completion = execute_nvidia_stream(
+            lambda: client.chat.completions.create(
+                model=NVIDIA_MODEL,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": safe_prompt,
+                    }
+                ],
+                temperature=0,
+                max_tokens=4096,
+                top_p=1,
+                reasoning_effort="low",
+                stream=True,
+            )
         )
 
         for chunk in completion:

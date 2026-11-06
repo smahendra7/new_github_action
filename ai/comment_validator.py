@@ -5,6 +5,13 @@ from typing import Optional
 
 from openai import OpenAI
 
+from ai.context_config import (
+    NVIDIA_BASE_URL,
+    NVIDIA_MODEL,
+)
+
+from ai.nvidia_request_lock import execute_nvidia_request
+
 from github.comment_extractor import (
     extract_comments_from_snippet,
     get_file_content,
@@ -23,9 +30,6 @@ from ai.chunk_manager import parse_diff_by_file
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-
-NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
-NVIDIA_MODEL = "poolside/laguna-xs-2.1"
 
 MAX_FALLBACK_CONTEXT_LINES = 15
 
@@ -273,18 +277,20 @@ def _validate_file_comments(
         errors="replace",
     ).decode("utf-8")
 
-    completion = client.chat.completions.create(
-        model=NVIDIA_MODEL,
-        messages=[
-            {
-                "role": "user",
-                "content": safe_prompt,
-            }
-        ],
-        temperature=0.0,
-        max_tokens=2048,
-        top_p=1,
-        stream=False,
+    completion = execute_nvidia_request(
+        lambda: client.chat.completions.create(
+            model=NVIDIA_MODEL,
+            messages=[
+                {
+                    "role": "user",
+                    "content": safe_prompt,
+                }
+            ],
+            temperature=0.0,
+            max_tokens=2048,
+            top_p=1,
+            stream=False,
+        )
     )
 
     response_text = (
@@ -499,6 +505,7 @@ def validate_code_comments(
     client = OpenAI(
         base_url=NVIDIA_BASE_URL,
         api_key=api_key,
+        max_retries=0,
     )
 
     all_mismatches: list[dict] = []

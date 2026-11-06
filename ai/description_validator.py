@@ -4,6 +4,13 @@ import re
 
 from openai import OpenAI
 
+from ai.context_config import (
+    NVIDIA_BASE_URL,
+    NVIDIA_MODEL,
+)
+
+from ai.nvidia_request_lock import execute_nvidia_request
+
 # Groq is inactive. Keep this import commented so the Groq package
 # is not required when NVIDIA is the active provider.
 # from groq import Groq
@@ -196,8 +203,9 @@ Reason: One short sentence
 
         # NVIDIA OpenAI-compatible client (active provider).
         client = OpenAI(
-            base_url="https://integrate.api.nvidia.com/v1",
-            api_key=api_key
+            base_url=NVIDIA_BASE_URL,
+            api_key=api_key,
+            max_retries=0,
         )
 
         # Groq client reference (inactive).
@@ -205,18 +213,20 @@ Reason: One short sentence
         #     api_key=os.environ.get("GROQ_API_KEY")
         # )
 
-        completion = client.chat.completions.create(
-            model="poolside/laguna-xs-2.1",
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            temperature=0.0,
-            max_tokens=512,
-            top_p=1,
-            stream=False
+        completion = execute_nvidia_request(
+            lambda: client.chat.completions.create(
+                model=NVIDIA_MODEL,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                temperature=0.0,
+                max_tokens=512,
+                top_p=1,
+                stream=False
+            )
         )
 
         if not completion.choices:
