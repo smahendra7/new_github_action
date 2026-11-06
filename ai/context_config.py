@@ -56,7 +56,7 @@ MAX_CONTEXT_LINES: int = 50
 FALLBACK_CONTEXT_WINDOW_LINES: int = 15
 
 # Maximum output tokens reserved per chunk request (matches reviewer.py max_tokens).
-MAX_OUTPUT_TOKENS: int = 4096
+MAX_OUTPUT_TOKENS: int = 8192
 
 # Overlap in lines when a large continuous hunk/region must be split into sub-chunks.
 CHUNK_OVERLAP_LINES: int = 30

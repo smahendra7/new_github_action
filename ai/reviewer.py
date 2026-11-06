@@ -42,6 +42,7 @@ def review_code_with_status(prompt: str) -> tuple[str, str]:
     client = OpenAI(
         base_url=NVIDIA_BASE_URL,
         api_key=os.environ["NVIDIA_API_KEY"],
+        max_retries=0,
     )
 
     # Groq client kept for reference (inactive).
@@ -72,7 +73,7 @@ def review_code_with_status(prompt: str) -> tuple[str, str]:
                     }
                 ],
                 temperature=0,
-                max_tokens=4096,
+                max_tokens=8192,
                 top_p=1,
                 reasoning_effort="low",
                 stream=True,
