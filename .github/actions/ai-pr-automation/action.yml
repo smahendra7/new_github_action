@@ -16,5 +16,5 @@ runs:
     - name: Run AI PR Automation
       shell: bash
       env:
-        AI_PR_AUTOMATION_REPOSITORY: boAt-Lifestyle/boat-AI-PR-automation
+        AI_PR_AUTOMATION_REPOSITORY: smahendra7/new_github_action
       run: python -u "${{ github.action_path }}/../../../run_action.py"

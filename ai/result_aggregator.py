@@ -543,6 +543,12 @@ def _aggregate_file_results(
 
             continue
 
+        # Only extract findings from successfully completed chunks or items
+        # with embedded notices (where failed chunks were already split into notices).
+        # Non-completed chunks without embedded notices contribute to notices, not findings.
+        if not is_completed and not embedded_notices:
+            continue
+
         # Normalize labels outside code fences.
         formatted_text = _bold_labels(review_text)
 

@@ -401,7 +401,57 @@ def _format_review(review_text: str) -> str:
         text,
     )
 
+    text = _remove_malformed_tables(text)
+
     return text.strip()
+
+
+def _remove_malformed_tables(text: str) -> str:
+    """Remove empty or orphaned Markdown table rows outside code fences.
+
+    Strips patterns like:
+        |   |
+        | - |
+    that appear without real table content (empty-header + separator only),
+    as well as standalone empty cell rows.  Leaves valid tables intact.
+    """
+    if not text:
+        return ""
+
+    # Split on code fences so we never touch content inside them.
+    parts = re.split(r"(```[\s\S]*?```)", text)
+
+    for index in range(0, len(parts), 2):
+        part = parts[index]
+
+        # Remove empty-header + separator blocks, optionally followed by
+        # more empty rows:
+        #   |   |
+        #   | - |
+        #   |   |   ← optional trailing empties
+        part = re.sub(
+            r"(?m)^\s*\|(?:\s*\|)+\s*\r?\n\s*\|(?:\s*[-:]+\s*\|)+\s*(?:\r?\n\s*\|(?:\s*\|)+\s*)*\r?\n?",
+            "",
+            part,
+        )
+
+        # Remove standalone empty-cell rows: |   | or | | |
+        part = re.sub(r"(?m)^\s*\|(?:\s*\|)+\s*$\r?\n?", "", part)
+
+        # Remove orphaned separator rows that are not part of a valid table.
+        # A separator is "orphaned" when it appears after a blank line (i.e.,
+        # not immediately preceded by a header or data row).  We detect this
+        # by requiring the line above the separator to be blank or the start
+        # of the string.
+        part = re.sub(
+            r"(?m)(?:(?<=\n\n)|(?<=\A))\s*\|(?:\s*[-:]+\s*\|)+\s*\r?\n?",
+            "",
+            part,
+        )
+
+        parts[index] = part
+
+    return "".join(parts)
 
 
 def _build_combined_comment(
@@ -423,12 +473,6 @@ def _build_combined_comment(
         "",
         "## AI Code Review",
     ]
-
-    if coverage_section:
-        parts.extend([
-            "",
-            coverage_section,
-        ])
 
     if formatted_review:
         parts.extend([
@@ -1889,6 +1933,15 @@ def process_pr_event(
             file_coverages,
         )
 
+        if coverage_section:
+            print(
+                "\n===== REVIEW COVERAGE (INTERNAL DIAGNOSTICS) ====="
+            )
+            print(coverage_section)
+            print(
+                "=================================================="
+            )
+
         if skipped_files:
             skipped_summary = [
                 "\n\n### Files Not Reviewed (Source Unavailable)",
@@ -1904,7 +1957,6 @@ def process_pr_event(
         combined_comment = _build_combined_comment(
             validation_section=validation_section,
             review_text=review,
-            coverage_section=coverage_section,
         )
 
         print(

@@ -192,7 +192,7 @@ Respond with ONLY the corrected comment text."""
     try:
         client = _get_client()
         if not client:
-            return f"Accurately describes what the code at line {line} does."
+            return f"Update the comment at line {line} to accurately describe the implementation."
 
         completion = execute_nvidia_request(
             lambda: client.chat.completions.create(
@@ -218,13 +218,17 @@ Respond with ONLY the corrected comment text."""
         print(suggestion)
         print("======================================================\n")
 
-        return suggestion if suggestion else (
-            f"Accurately describes what the code at line {line} does."
-        )
+        # Suppress suggestions that are empty or identical to the original
+        if not suggestion:
+            return ""
+
+        if suggestion.strip().lower() == (comment or "").strip().lower():
+            return ""
+
+        return suggestion
 
     except Exception as e:
         print(
-            f"[suggestion_generator] Comment suggestion error for line {line}: {e}. "
-            "Using fallback."
+            f"[suggestion_generator] Comment suggestion error for line {line}: {e}."
         )
-        return f"Accurately describes what the code at line {line} does."
+        return f"Update the comment at line {line} to accurately describe the implementation."

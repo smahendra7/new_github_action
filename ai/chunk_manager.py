@@ -1112,7 +1112,59 @@ def _is_permanent_error(exc: Exception) -> bool:
         return True
     if "bad request" in msg or "invalid_request_error" in msg:
         return True
+    if "maximum retries exhausted" in msg:
+        return True
     return False
+
+
+def _classify_failure(exc: Optional[Exception] = None, status: str = "", review_text: str = "") -> str:
+    """Classify the exact failure category for structured diagnostics."""
+    if exc:
+        status_code = getattr(exc, "status_code", None)
+        msg = str(exc).lower()
+        if status_code == 429 or "rate limit" in msg or "429" in msg:
+            return "RATE_LIMIT_429"
+        if status_code in {401, 403} or "unauthorized" in msg or "invalid api key" in msg or "authentication" in msg:
+            return "AUTH_ERROR"
+        if (status_code == 400 and ("context_length" in msg or "max_tokens" in msg or "too large" in msg)) or "context length" in msg:
+            return "CONTEXT_LENGTH_EXCEEDED"
+        if "timeout" in msg or "timed out" in msg:
+            return "REQUEST_TIMEOUT"
+        if "connection" in msg:
+            return "CONNECTION_FAILURE"
+        if "maximum retries exhausted" in msg:
+            return "PROVIDER_RETRIES_EXHAUSTED"
+        if status_code and status_code >= 500:
+            return f"SERVER_ERROR_{status_code}"
+        return f"API_ERROR_{status_code}" if status_code else "API_ERROR"
+
+    if not review_text or not review_text.strip() or review_text.strip() == "No review generated.":
+        return "EMPTY_RESPONSE"
+
+    msg = review_text.lower()
+    if "429" in msg or "rate limit" in msg:
+        return "RATE_LIMIT_429"
+    if "401" in msg or "403" in msg or "unauthorized" in msg or "authentication" in msg or "invalid api key" in msg:
+        return "AUTH_ERROR"
+    if "context length" in msg or "context_length" in msg or "too large" in msg:
+        return "CONTEXT_LENGTH_EXCEEDED"
+    if "timeout" in msg or "timed out" in msg:
+        return "REQUEST_TIMEOUT"
+    if "connection" in msg:
+        return "CONNECTION_FAILURE"
+    if "maximum retries exhausted" in msg:
+        return "PROVIDER_RETRIES_EXHAUSTED"
+    if "500" in msg or "502" in msg or "503" in msg or "504" in msg:
+        for code in (500, 502, 503, 504):
+            if str(code) in msg:
+                return f"SERVER_ERROR_{code}"
+    if "hit generation length limit" in msg or "output token limit" in msg:
+        return "OUTPUT_TOKEN_LIMIT_REACHED"
+    if status == CHUNK_STATUS_INCOMPLETE or "incomplete" in msg or "no valid review generated" in msg:
+        return "INCOMPLETE_OR_MALFORMED"
+    if status == CHUNK_STATUS_FAILED or "failed" in msg:
+        return "FAILED_REVIEW"
+    return "NONE"
 
 
 # ---------------------------------------------------------------------
@@ -1217,6 +1269,7 @@ def _review_single_chunk(
     last_status = CHUNK_STATUS_INCOMPLETE
 
     for attempt in range(1, max_attempts + 1):
+        start_time = time.monotonic()
         print(
             f"\n[CHUNK {chunk.chunk_id}/{chunk.total_chunks}] "
             f"Attempt {attempt}/{max_attempts} for {chunk.file_path} "
@@ -1227,10 +1280,28 @@ def _review_single_chunk(
 
         try:
             result = review_code(chunk_prompt)
+            duration = time.monotonic() - start_time
             status, review_text = _infer_review_status(result)
+            failure_cat = _classify_failure(status=status, review_text=review_text)
+
+            print(
+                f"[CHUNK DIAGNOSTICS] File: {chunk.file_path} | Chunk: {chunk.chunk_id}/{chunk.total_chunks} | "
+                f"Attempt: {attempt}/{max_attempts} | Duration: {duration:.2f}s | Status: {status} | "
+                f"Tokens: {token_count} | Failure: {failure_cat}"
+            )
 
             if status in {CHUNK_STATUS_COMPLETED_WITH_FINDINGS, CHUNK_STATUS_COMPLETED_NO_ISSUES}:
-                return ReviewResult(review_text, status=status)
+                res = ReviewResult(review_text, status=status)
+                res.diagnostics = {
+                    "file": chunk.file_path,
+                    "chunk_id": chunk.chunk_id,
+                    "total_chunks": chunk.total_chunks,
+                    "attempt": attempt,
+                    "duration": duration,
+                    "status": status,
+                    "failure_category": "NONE",
+                }
+                return res
 
             # Recoverable response failure (empty, truncated, or incomplete)
             last_review_text = review_text
@@ -1238,7 +1309,7 @@ def _review_single_chunk(
 
             if attempt < max_attempts:
                 print(
-                    f"[CHUNK {chunk.chunk_id}] Attempt {attempt} returned {status}: "
+                    f"[CHUNK {chunk.chunk_id}] Attempt {attempt} returned {status} ({failure_cat}): "
                     f"'{review_text[:100] if review_text else ''}...'. Retrying..."
                 )
                 delay = retry_delay * (2 ** (attempt - 1))
@@ -1246,24 +1317,49 @@ def _review_single_chunk(
                     time.sleep(delay)
                 continue
             else:
-                final_text = (
-                    review_text
-                    if review_text and review_text != "No review generated."
-                    else f"No valid review generated after {max_attempts} attempts."
-                )
-                return ReviewResult(final_text, status=status)
+                final_text = f"No valid review generated after {max_attempts} attempts. Last status: {status} ({failure_cat})."
+                res = ReviewResult(final_text, status=status)
+                res.diagnostics = {
+                    "file": chunk.file_path,
+                    "chunk_id": chunk.chunk_id,
+                    "total_chunks": chunk.total_chunks,
+                    "attempt": attempt,
+                    "duration": duration,
+                    "status": status,
+                    "failure_category": failure_cat,
+                }
+                return res
 
         except Exception as exc:
+            duration = time.monotonic() - start_time
             last_error = exc
+            failure_cat = _classify_failure(exc=exc)
+
+            print(
+                f"[CHUNK DIAGNOSTICS] File: {chunk.file_path} | Chunk: {chunk.chunk_id}/{chunk.total_chunks} | "
+                f"Attempt: {attempt}/{max_attempts} | Duration: {duration:.2f}s | Status: FAILED | "
+                f"Tokens: {token_count} | Exception: {type(exc).__name__}: {exc} | Failure: {failure_cat}"
+            )
+
             if _is_permanent_error(exc):
                 print(f"[CHUNK {chunk.chunk_id}] Permanent error on attempt {attempt}: {exc}")
-                return ReviewResult(
-                    f"Error occurred during AI code review: {exc}",
+                res = ReviewResult(
+                    f"Error occurred during AI code review: {exc} ({failure_cat})",
                     status=CHUNK_STATUS_FAILED,
                 )
+                res.diagnostics = {
+                    "file": chunk.file_path,
+                    "chunk_id": chunk.chunk_id,
+                    "total_chunks": chunk.total_chunks,
+                    "attempt": attempt,
+                    "duration": duration,
+                    "status": CHUNK_STATUS_FAILED,
+                    "failure_category": failure_cat,
+                }
+                return res
 
             last_status = CHUNK_STATUS_FAILED
-            last_review_text = f"Error occurred during AI code review: {exc}"
+            last_review_text = f"Error occurred during AI code review: {exc} ({failure_cat})"
 
             if attempt < max_attempts:
                 print(f"[CHUNK {chunk.chunk_id}] Temporary error on attempt {attempt}: {exc}. Retrying...")
@@ -1273,10 +1369,20 @@ def _review_single_chunk(
                 continue
             else:
                 print(f"[CHUNK {chunk.chunk_id}] All {max_attempts} attempts failed: {exc}")
-                return ReviewResult(
+                res = ReviewResult(
                     last_review_text,
                     status=CHUNK_STATUS_FAILED,
                 )
+                res.diagnostics = {
+                    "file": chunk.file_path,
+                    "chunk_id": chunk.chunk_id,
+                    "total_chunks": chunk.total_chunks,
+                    "attempt": attempt,
+                    "duration": duration,
+                    "status": CHUNK_STATUS_FAILED,
+                    "failure_category": failure_cat,
+                }
+                return res
 
     return ReviewResult(
         last_review_text or f"No valid review generated after {max_attempts} attempts.",
@@ -1402,6 +1508,7 @@ def execute_chunked_review(
                         "file": chunk.file_path,
                         "status": status,
                         "review": review_text,
+                        "diagnostics": getattr(result, "diagnostics", {}),
                     }
 
                 except Exception as chunk_error:
@@ -1537,6 +1644,7 @@ def calculate_review_coverage(
                 "chunks_incomplete": 0,
                 "chunks_failed": 0,
                 "status": "NOT_REVIEWED",
+                "incomplete_chunk_details": [],
             }
 
     for item in chunk_results:
@@ -1550,18 +1658,39 @@ def calculate_review_coverage(
                 "chunks_incomplete": 0,
                 "chunks_failed": 0,
                 "status": "NOT_REVIEWED",
+                "incomplete_chunk_details": [],
             }
 
         rec = file_map[f_path]
+        rec.setdefault("incomplete_chunk_details", [])
         rec["chunks_generated"] += 1
         if status in SUCCESSFUL_CHUNK_STATUSES:
             rec["chunks_succeeded"] += 1
         elif status == CHUNK_STATUS_INCOMPLETE:
             rec["chunks_incomplete"] += 1
+            # Capture per-chunk failure reason for the report.
+            diag = item.get("diagnostics") or {}
+            failure_cat = diag.get("failure_category", "INCOMPLETE")
+            chunk_id = item.get("chunk_id", "?")
+            rec["incomplete_chunk_details"].append(
+                {"chunk_id": chunk_id, "failure_category": failure_cat}
+            )
         elif status == CHUNK_STATUS_FAILED:
             rec["chunks_failed"] += 1
+            diag = item.get("diagnostics") or {}
+            failure_cat = diag.get("failure_category", "FAILED")
+            chunk_id = item.get("chunk_id", "?")
+            rec.setdefault("incomplete_chunk_details", []).append(
+                {"chunk_id": chunk_id, "failure_category": failure_cat}
+            )
         else:
             rec["chunks_incomplete"] += 1
+            diag = item.get("diagnostics") or {}
+            failure_cat = diag.get("failure_category", "INCOMPLETE")
+            chunk_id = item.get("chunk_id", "?")
+            rec.setdefault("incomplete_chunk_details", []).append(
+                {"chunk_id": chunk_id, "failure_category": failure_cat}
+            )
 
     file_coverages = []
     for rec in file_map.values():
@@ -1655,6 +1784,30 @@ def format_coverage_section(
                 f_stat = fc.get("status", "").replace("_", " ").title()
                 succ = fc.get("chunks_succeeded", 0)
                 gen = fc.get("chunks_generated", 0)
-                lines.append(f"- `{f_name}`: {f_stat} ({succ}/{gen} chunks completed)")
+                chunk_detail_parts = []
+                for detail in fc.get("incomplete_chunk_details", []):
+                    cid = detail.get("chunk_id", "?")
+                    cat = detail.get("failure_category", "")
+                    if cat and cat not in ("INCOMPLETE", "FAILED", "NONE"):
+                        chunk_detail_parts.append(f"chunk {cid}: {cat}")
+                    else:
+                        chunk_detail_parts.append(f"chunk {cid}: incomplete")
+                if chunk_detail_parts:
+                    detail_str = "; ".join(chunk_detail_parts)
+                    lines.append(
+                        f"- `{f_name}`: {f_stat} ({succ}/{gen} chunks completed)"
+                        f" — {detail_str}"
+                    )
+                else:
+                    lines.append(
+                        f"- `{f_name}`: {f_stat} ({succ}/{gen} chunks completed)"
+                    )
+
+    # Append an explicit warning when the review is incomplete.
+    if status_raw in ("PARTIALLY_REVIEWED", "NOT_REVIEWED"):
+        lines.append(
+            "\n> ⚠️ **This review is incomplete.** Some chunks could not be "
+            "reviewed. The findings above may not cover all changed code."
+        )
 
     return "\n".join(lines)

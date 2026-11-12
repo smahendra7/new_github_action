@@ -11,7 +11,10 @@ import os
 SAFE_INPUT_TOKEN_LIMIT: int = 120_000
 
 # Maximum number of concurrent AI requests to NVIDIA NIM.
-MAX_CONCURRENCY: int = 1
+# Increased from 1 → 2 to allow the next chunk to begin acquiring the rate-limit
+# slot while the current chunk's response is being processed, reducing idle wait time.
+# The rolling RPM window in nvidia_request_lock.py still enforces the per-minute cap.
+MAX_CONCURRENCY: int = 2
 # ============================================================
 # NVIDIA API RATE LIMIT CONFIGURATION
 # ============================================================
@@ -19,11 +22,14 @@ MAX_CONCURRENCY: int = 1
 # NVIDIA account RPM limit
 NVIDIA_ACCOUNT_RPM: int = 40
 
-# CodeGate target RPM
+# CodeGate target RPM — kept at 30 to stay safely below the account limit.
 NVIDIA_TARGET_RPM: int = 30
 
-# Minimum interval between request starts
-NVIDIA_MIN_REQUEST_INTERVAL: float = 2.0
+# Minimum interval between request starts (seconds).
+# At NVIDIA_TARGET_RPM=30, the theoretical minimum is 60/30 = 2.0 s.
+# Lowered to 1.5 s: the rolling-window RPM cap already enforces the hard limit,
+# and actual API call durations typically exceed 2 s, so this rarely fires.
+NVIDIA_MIN_REQUEST_INTERVAL: float = 1.5
 
 # Maximum retries per individual API request
 NVIDIA_MAX_RETRIES: int = 5
@@ -56,7 +62,7 @@ MAX_CONTEXT_LINES: int = 50
 FALLBACK_CONTEXT_WINDOW_LINES: int = 15
 
 # Maximum output tokens reserved per chunk request (matches reviewer.py max_tokens).
-MAX_OUTPUT_TOKENS: int = 8192
+MAX_OUTPUT_TOKENS: int = 15500
 
 # Overlap in lines when a large continuous hunk/region must be split into sub-chunks.
 CHUNK_OVERLAP_LINES: int = 30

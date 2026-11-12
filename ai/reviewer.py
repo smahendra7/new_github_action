@@ -73,9 +73,8 @@ def review_code_with_status(prompt: str) -> tuple[str, str]:
                     }
                 ],
                 temperature=0,
-                max_tokens=8192,
+                max_tokens=15500,
                 top_p=1,
-                reasoning_effort="low",
                 stream=True,
             )
         )
@@ -133,7 +132,15 @@ def review_code_with_status(prompt: str) -> tuple[str, str]:
     full_review = "".join(review_buffer).strip()
 
     if not full_review:
-        print("[DEBUG] AI returned no usable review text.")
+        if reasoning_received:
+            print(
+                "[DEBUG] Model produced ONLY reasoning tokens and zero content. "
+                "This indicates the model consumed its entire token budget on "
+                "internal chain-of-thought. If reasoning_effort is configured, "
+                "removing it will fix this."
+            )
+        else:
+            print("[DEBUG] AI returned no usable review text.")
         return "incomplete", "No review generated."
 
     # A length finish reason means the model may have stopped before

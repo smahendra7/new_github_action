@@ -21,7 +21,7 @@ _CODE_EXTENSIONS = {
 }
 
 _PYTHON_EXTENSIONS = {".py"}
-_HASH_COMMENT_EXTENSIONS = {".rb", ".php", ".sh"}
+_HASH_COMMENT_EXTENSIONS = {".py", ".rb", ".php", ".sh"}
 
 _TODO_FIXME_PATTERN = re.compile(
     r"\b(TODO|FIXME)\b",
@@ -264,6 +264,43 @@ def _get_context_window(
     )
 
 
+def _is_decorative_comment(comment_text: str) -> bool:
+    """Return True for comments that are only decorative separators."""
+    stripped = (comment_text or "").strip()
+    if not stripped:
+        return True
+    # If 90%+ of chars are non-alphanumeric, it's decorative
+    non_alnum = sum(1 for c in stripped if not c.isalnum() and not c.isspace())
+    return len(stripped) > 2 and non_alnum / len(stripped) >= 0.9
+
+
+def _is_test_label_comment(comment_text: str) -> bool:
+    """Return True for pure test/section labels with no documentary value."""
+    import re as _re
+    stripped = (comment_text or "").strip()
+    return bool(_re.match(r'^(?:TEST\s*\d+|CASE\s*\d+|STEP\s*\d+)$', stripped, _re.IGNORECASE))
+
+
+_EXECUTABLE_KEYWORDS = (
+    "def ", "async def ", "class ", "return ", "import ", "from ",
+    "if ", "elif ", "else:", "try:", "except ", "finally:",
+    "while ", "for ", "with ", "assert ", "raise ", "pass",
+    "continue", "break", "yield ", "del ", "global ", "nonlocal "
+)
+
+
+def _is_executable_statement(comment_text: str) -> bool:
+    """Return True if text looks like an executable code statement rather than a comment."""
+    stripped = (comment_text or "").strip()
+    if not stripped:
+        return False
+    if any(stripped == kw.strip() or stripped.startswith(kw) for kw in _EXECUTABLE_KEYWORDS):
+        return True
+    if re.match(r'^[a-zA-Z_]\w*\s*(?:=|\+=|-=|\*=|/=|//=)\s*.+', stripped):
+        return True
+    return False
+
+
 def _append_comment(
     comments: list[dict],
     file_path: str,
@@ -278,6 +315,15 @@ def _append_comment(
         return
 
     if _is_todo_fixme(comment_text):
+        return
+
+    if _is_decorative_comment(comment_text):
+        return
+
+    if _is_test_label_comment(comment_text):
+        return
+
+    if _is_executable_statement(comment_text):
         return
 
     comments.append(
@@ -378,6 +424,9 @@ def _extract_comments_generic(
 
     supports_hash_comments = (
         extension in _HASH_COMMENT_EXTENSIONS
+    )
+    supports_double_slash = (
+        extension not in {".py", ".rb", ".sh"}
     )
 
     in_block_comment = False
@@ -544,7 +593,7 @@ def _extract_comments_generic(
                 continue
 
             # Start of a // line comment.
-            if line.startswith("//", position):
+            if supports_double_slash and line.startswith("//", position):
                 comment_text = line[position + 2:].strip()
 
                 comment_parts.append(comment_text)
