@@ -26,7 +26,7 @@ jobs:
           python-version: "3.11"
 
       - name: Run AI PR Automation
-        uses: boAt-Lifestyle/boat-AI-PR-automation/.github/actions/ai-pr-automation@main
+        uses: smahendra7/new_github_action/.github/actions/ai-pr-automation@main
         env:
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
