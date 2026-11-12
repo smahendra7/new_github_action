@@ -482,6 +482,12 @@ def _aggregate_file_results(
             item.get("status") or "completed"
         ).lower()
 
+        is_completed = status in {
+            "completed",
+            "completed_with_findings",
+            "completed_no_issues",
+        }
+
         review_text = str(
             item.get("review") or ""
         ).strip()
@@ -495,7 +501,7 @@ def _aggregate_file_results(
 
         notices.extend(embedded_notices)
 
-        if status != "completed" and not embedded_notices:
+        if not is_completed and not embedded_notices:
             notices.append(
                 (
                     file_label,
@@ -508,8 +514,9 @@ def _aggregate_file_results(
         if (
             not review_text
             or review_text == "No review generated."
+            or review_text.startswith("No review generated")
         ):
-            if not embedded_notices and status == "completed":
+            if not embedded_notices and is_completed:
                 notices.append(
                     (
                         file_label,
@@ -525,7 +532,7 @@ def _aggregate_file_results(
             "Error occurred during AI code review" in review_text
             or "inference engine failure" in review_text.lower()
         ):
-            if not embedded_notices and status == "completed":
+            if not embedded_notices and is_completed:
                 notices.append(
                     (
                         file_label,
@@ -573,10 +580,10 @@ def _aggregate_file_results(
             continue
 
         # Only completed results can qualify as clean.
-        if status == "completed":
+        if is_completed:
 
-            if _is_explicitly_clean(review_text):
-                clean_non_issues.append(review_text)
+            if status == "completed_no_issues" or _is_explicitly_clean(review_text):
+                clean_non_issues.append(review_text or "No issues found.")
 
             else:
                 collapsed = " ".join(

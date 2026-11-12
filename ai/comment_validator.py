@@ -111,25 +111,28 @@ File: {file_path}
 Your task is to verify whether each supplied source-code comment accurately
 describes the associated code.
 
-IMPORTANT RULES:
+CLASSIFICATION CATEGORIES:
+- ACCURATE: Comment correctly describes the implementation. (NEVER report as an issue).
+- MISMATCH: Comment contradicts actual implementation.
+- INACCURATE: Comment contains factually incorrect information.
+- OUTDATED: Comment no longer represents the current implementation because the implementation changed.
+- UNNECESSARY: Comment provides no meaningful information or is misleadingly redundant. Flag ONLY when there is a genuine maintenance concern.
 
-1. First determine whether the supplied text is a genuine source-code comment.
-2. A genuine comment may use #, //, /* */, or an appropriate language docstring.
-3. Do not treat strings, regular expressions, URLs, executable code, or function
-   calls as comments.
-4. Do not flag a comment if you cannot confidently determine what it describes.
-
-FLAG A MISMATCH ONLY WHEN ALL CONDITIONS ARE SATISFIED:
-
-- The text is clearly a genuine human-written source-code comment.
-- The comment describes behavior, logic, parameters, or a value.
-- The associated code demonstrably does something different.
-- The mismatch is clear, specific, and supported by the supplied code.
-- A @param or @return documentation tag demonstrably contradicts the code.
-- The comment is demonstrably outdated compared with the current implementation.
+CRITICAL RULES:
+1. Always compare the comment directly against the actual implementation, not just its wording.
+2. If the comment correctly describes what the code does or its purpose, classify it as ACCURATE.
+3. Comments classified as ACCURATE MUST NEVER be flagged, warned, or reported as a finding.
+4. Do NOT flag a comment simply because alternative wording, phrasing, or formatting could be suggested.
+5. Do NOT flag comments that are already accurate and sufficiently descriptive.
+6. Avoid reporting unchanged comments unless changes in the implementation made them outdated or contradicted.
+7. Only comments with a demonstrable problem (MISMATCH, INACCURATE, OUTDATED, or UNNECESSARY) should generate findings.
+8. If you cannot establish a genuine, demonstrable mismatch between the comment and the code, classify as ACCURATE.
+9. First determine whether the supplied text is a genuine source-code comment (#, //, /* */, or docstrings).
+10. Do not treat strings, regular expressions, URLs, executable code, or function calls as comments.
+11. Do not flag a comment if you cannot confidently determine what it describes.
 
 DO NOT FLAG:
-
+- Comments that accurately describe the implementation's purpose or behavior.
 - Missing comments or missing docstrings.
 - Minor wording or style differences.
 - Accurate comments that provide less detail than the implementation.
@@ -148,17 +151,18 @@ COMMENTS TO REVIEW:
 
 OUTPUT FORMAT:
 
-For each confirmed mismatch, return one block in exactly this format:
+For comments that have demonstrable issues (classification is MISMATCH, INACCURATE, OUTDATED, or UNNECESSARY), return one block in exactly this format:
 
 ---
 File: {file_path}
 Line: <line number>
+Classification: <MISMATCH | INACCURATE | OUTDATED | UNNECESSARY>
 Comment: "<exact comment text>"
 Code: <short snippet or summary of actual behavior>
-Reason: <clear, specific explanation>
+Reason: <clear, specific explanation of why the comment contradicts or misrepresents the code>
 ---
 
-If all comments are accurate, return exactly:
+If all comments are ACCURATE or no genuine issues exist, return exactly:
 
 NO_MISMATCHES
 """
@@ -168,16 +172,59 @@ NO_MISMATCHES
 # Parse AI response
 # ---------------------------------------------------------------------------
 
+VALID_FINDING_CLASSIFICATIONS = {
+    "MISMATCH",
+    "INACCURATE",
+    "OUTDATED",
+    "UNNECESSARY",
+}
+
+_ACCURATE_REASON_INDICATORS = (
+    "accurately describes",
+    "accurately reflects",
+    "accurately represents",
+    "accurately summarizes",
+    "correctly describes",
+    "correctly reflects",
+    "correctly represents",
+    "is accurate",
+    "comment is accurate",
+    "comment accurately",
+    "matches the implementation",
+    "matches the code",
+    "matches implementation",
+    "matches code",
+    "no mismatch",
+    "no issue",
+    "no discrepancy",
+    "accurate description",
+)
+
+
+def _is_accurate_comment(classification: str, reason: str) -> bool:
+    """Return True if classification or reason indicates the comment is accurate."""
+    norm_classification = (classification or "").strip().upper()
+    if norm_classification == "ACCURATE":
+        return True
+
+    reason_lower = (reason or "").strip().lower()
+    return any(indicator in reason_lower for indicator in _ACCURATE_REASON_INDICATORS)
+
+
 def _parse_mismatch_blocks(response_text: str) -> list[dict]:
     """
     Parse mismatch blocks from the AI response.
 
-    Supports multiline Code and Reason fields.
+    Supports multiline Code and Reason fields, and Classification field.
+    Filters out any blocks classified as ACCURATE or stating accuracy in reasoning.
     """
 
     mismatches = []
 
     if not response_text:
+        return mismatches
+
+    if response_text.strip().upper() == "NO_MISMATCHES":
         return mismatches
 
     blocks = re.split(
@@ -199,6 +246,11 @@ def _parse_mismatch_blocks(response_text: str) -> list[dict]:
 
         line_match = re.search(
             r"(?im)^Line:\s*(.+?)\s*$",
+            block,
+        )
+
+        classification_match = re.search(
+            r"(?im)^Classification:\s*(.+?)\s*$",
             block,
         )
 
@@ -228,6 +280,27 @@ def _parse_mismatch_blocks(response_text: str) -> list[dict]:
         ):
             continue
 
+        raw_classification = (
+            classification_match.group(1).strip().upper()
+            if classification_match
+            else ""
+        )
+        reason = reason_match.group(1).strip()
+
+        # Critical rule: ACCURATE must never result in a finding.
+        if _is_accurate_comment(raw_classification, reason):
+            continue
+
+        # If a classification is supplied, verify it belongs to valid finding categories
+        if raw_classification and raw_classification not in VALID_FINDING_CLASSIFICATIONS:
+            continue
+
+        classification = (
+            raw_classification
+            if raw_classification in VALID_FINDING_CLASSIFICATIONS
+            else "MISMATCH"
+        )
+
         comment = comment_match.group(1).strip()
 
         # Remove surrounding quotation marks if present.
@@ -242,11 +315,12 @@ def _parse_mismatch_blocks(response_text: str) -> list[dict]:
             {
                 "file": file_match.group(1).strip(),
                 "line": line_match.group(1).strip(),
+                "classification": classification,
                 "comment": comment,
                 "code": " ".join(
                     code_match.group(1).strip().splitlines()
                 ),
-                "reason": reason_match.group(1).strip(),
+                "reason": reason,
             }
         )
 
@@ -812,14 +886,24 @@ def format_comment_validation_failure(
     blocks = []
 
     for item in mismatches:
+        classification = str(item.get("classification", "")).strip().upper()
+        reason = str(item.get("reason", "")).strip()
+        if _is_accurate_comment(classification, reason):
+            continue
+
+        classification_line = f"Classification: {classification}\n" if classification else ""
 
         blocks.append(
             f"File: {item.get('file', 'Unknown')}\n"
             f"Line: {item.get('line', 'Unknown')}\n"
+            f"{classification_line}"
             f'Comment: "{item.get("comment", "")}"\n'
             f"Code: {item.get('code', '')}\n"
-            f"Reason: {item.get('reason', '')}"
+            f"Reason: {reason}"
         )
+
+    if not blocks:
+        return ""
 
     mismatch_text = "\n\n".join(blocks)
 

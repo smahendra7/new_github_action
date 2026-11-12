@@ -13,12 +13,14 @@ Responsibilities:
 - Preserve failed and incomplete results during aggregation.
 """
 
+import os
 import re
 import shlex
+import time
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ai.context_config import (
     SAFE_INPUT_TOKEN_LIMIT,
@@ -30,7 +32,12 @@ from ai.context_config import (
 
 from ai.token_counter import count_tokens
 from ai.prompt_builder import build_review_prompt, build_chunk_prompt
-from ai.result_aggregator import aggregate_reviews
+from ai.result_aggregator import (
+    aggregate_reviews,
+    _extract_issue_blocks,
+    _bold_labels,
+    _is_explicitly_clean,
+)
 from ai.reviewer import ReviewResult, review_code
 
 
@@ -1077,25 +1084,35 @@ def create_review_chunks(
 
 
 # ---------------------------------------------------------------------
-# Individual chunk review
+# Chunk review statuses and helpers
 # ---------------------------------------------------------------------
 
-def _review_single_chunk(chunk: ReviewChunk) -> str:
-    """Build and submit one chunk review request."""
-    chunk_prompt = build_chunk_prompt(chunk)
+CHUNK_STATUS_COMPLETED_WITH_FINDINGS = "COMPLETED_WITH_FINDINGS"
+CHUNK_STATUS_COMPLETED_NO_ISSUES = "COMPLETED_NO_ISSUES"
+CHUNK_STATUS_INCOMPLETE = "INCOMPLETE"
+CHUNK_STATUS_FAILED = "FAILED"
 
-    token_count = count_tokens(chunk_prompt)
+SUCCESSFUL_CHUNK_STATUSES = {
+    CHUNK_STATUS_COMPLETED_WITH_FINDINGS,
+    CHUNK_STATUS_COMPLETED_NO_ISSUES,
+    "completed",
+    "COMPLETED",
+}
 
-    print(
-        f"\n[CHUNK {chunk.chunk_id}/{chunk.total_chunks}] "
-        f"Starting AI review for {chunk.file_path} "
-        f"(Lines {chunk.start_line or 'all'}.."
-        f"{chunk.end_line or 'all'}, "
-        f"{token_count} input tokens, "
-        f"{len(chunk_prompt)} characters)..."
-    )
 
-    return review_code(chunk_prompt)
+def _is_permanent_error(exc: Exception) -> bool:
+    """Return True if an exception represents an unrecoverable client or auth failure."""
+    if exc is None:
+        return False
+    status_code = getattr(exc, "status_code", None)
+    if status_code in {400, 401, 403, 404}:
+        return True
+    msg = str(exc).lower()
+    if any(k in msg for k in ["unauthorized", "invalid api key", "authentication", "forbidden"]):
+        return True
+    if "bad request" in msg or "invalid_request_error" in msg:
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------
@@ -1108,54 +1125,163 @@ def _infer_review_status(
     """
     Determine the status and text of an individual chunk result.
 
-    Explicit ReviewResult statuses take precedence. Plain strings are
-    handled conservatively.
+    Returns:
+        (status, review_text)
+    where status is one of:
+        COMPLETED_WITH_FINDINGS, COMPLETED_NO_ISSUES, INCOMPLETE, FAILED
     """
     if result is None:
-        return "incomplete", ""
+        return CHUNK_STATUS_INCOMPLETE, ""
 
     review_text = str(result).strip()
+    status_attr = getattr(result, "status", None)
+    raw_status = str(status_attr).upper() if status_attr else ""
 
-    status = getattr(result, "status", None)
+    if raw_status in {
+        CHUNK_STATUS_COMPLETED_WITH_FINDINGS,
+        CHUNK_STATUS_COMPLETED_NO_ISSUES,
+        CHUNK_STATUS_INCOMPLETE,
+        CHUNK_STATUS_FAILED,
+    }:
+        return raw_status, review_text
 
-    if status:
-        normalized_status = str(status).lower()
-
-        if normalized_status in {
-            "completed",
-            "failed",
-            "incomplete",
-        }:
-            return normalized_status, review_text
-
-        return "incomplete", review_text
-
-    if not review_text:
-        return "incomplete", ""
-
-    if review_text == "No review generated.":
-        return "incomplete", review_text
+    if (
+        not review_text
+        or review_text == "No review generated."
+        or review_text.startswith("No review generated")
+    ):
+        return CHUNK_STATUS_INCOMPLETE, review_text or "No review generated."
 
     if (
         "Error occurred during AI code review" in review_text
         or "inference engine failure" in review_text.lower()
     ):
-        return "failed", review_text
+        return CHUNK_STATUS_FAILED, review_text
 
-    if re.search(
-        r"(?im)^###\s+.*Review Notices\s*$",
-        review_text,
+    if re.search(r"(?im)^###\s+.*Review Notices\s*$", review_text):
+        if re.search(r"\(failed\)", review_text, re.IGNORECASE):
+            return CHUNK_STATUS_FAILED, review_text
+        return CHUNK_STATUS_INCOMPLETE, review_text
+
+    if raw_status in {"FAILED"}:
+        return CHUNK_STATUS_FAILED, review_text
+
+    if raw_status in {"INCOMPLETE"}:
+        return CHUNK_STATUS_INCOMPLETE, review_text
+
+    # Check for structured findings
+    formatted_text = _bold_labels(review_text)
+    issue_blocks = _extract_issue_blocks(formatted_text)
+    if issue_blocks or re.search(r"(?im)^\s*\*\*Issue:\*\*", formatted_text):
+        return CHUNK_STATUS_COMPLETED_WITH_FINDINGS, review_text
+
+    if (
+        _is_explicitly_clean(review_text)
+        or "no issues" in review_text.lower()
+        or "looks good" in review_text.lower()
     ):
-        if re.search(
-            r"\(failed\)",
-            review_text,
-            re.IGNORECASE,
-        ):
-            return "failed", review_text
+        return CHUNK_STATUS_COMPLETED_NO_ISSUES, review_text
 
-        return "incomplete", review_text
+    if raw_status in {"COMPLETED"}:
+        return CHUNK_STATUS_COMPLETED_NO_ISSUES, review_text
 
-    return "completed", review_text
+    return CHUNK_STATUS_COMPLETED_NO_ISSUES, review_text
+
+
+# ---------------------------------------------------------------------
+# Individual chunk review with retry mechanism
+# ---------------------------------------------------------------------
+
+def _review_single_chunk(
+    chunk: ReviewChunk,
+    max_attempts: int = 3,
+    retry_delay: Optional[float] = None,
+) -> ReviewResult:
+    """
+    Build and submit one chunk review request with a controlled retry mechanism.
+
+    Retries up to max_attempts (default 3) on:
+    - Empty or whitespace-only responses
+    - Malformed or truncated responses (finish_reason != 'stop')
+    - Missing required fields
+    - Temporary API errors (HTTP 429, 500, timeouts, connection drops)
+    - Other recoverable failures
+    """
+    chunk_prompt = build_chunk_prompt(chunk)
+    token_count = count_tokens(chunk_prompt)
+    if retry_delay is None:
+        retry_delay = float(os.environ.get("CODEGATE_RETRY_DELAY", "0.5"))
+
+    last_error = None
+    last_review_text = ""
+    last_status = CHUNK_STATUS_INCOMPLETE
+
+    for attempt in range(1, max_attempts + 1):
+        print(
+            f"\n[CHUNK {chunk.chunk_id}/{chunk.total_chunks}] "
+            f"Attempt {attempt}/{max_attempts} for {chunk.file_path} "
+            f"(Lines {chunk.start_line or 'all'}.."
+            f"{chunk.end_line or 'all'}, "
+            f"{token_count} input tokens)..."
+        )
+
+        try:
+            result = review_code(chunk_prompt)
+            status, review_text = _infer_review_status(result)
+
+            if status in {CHUNK_STATUS_COMPLETED_WITH_FINDINGS, CHUNK_STATUS_COMPLETED_NO_ISSUES}:
+                return ReviewResult(review_text, status=status)
+
+            # Recoverable response failure (empty, truncated, or incomplete)
+            last_review_text = review_text
+            last_status = status
+
+            if attempt < max_attempts:
+                print(
+                    f"[CHUNK {chunk.chunk_id}] Attempt {attempt} returned {status}: "
+                    f"'{review_text[:100] if review_text else ''}...'. Retrying..."
+                )
+                delay = retry_delay * (2 ** (attempt - 1))
+                if delay > 0:
+                    time.sleep(delay)
+                continue
+            else:
+                final_text = (
+                    review_text
+                    if review_text and review_text != "No review generated."
+                    else f"No valid review generated after {max_attempts} attempts."
+                )
+                return ReviewResult(final_text, status=status)
+
+        except Exception as exc:
+            last_error = exc
+            if _is_permanent_error(exc):
+                print(f"[CHUNK {chunk.chunk_id}] Permanent error on attempt {attempt}: {exc}")
+                return ReviewResult(
+                    f"Error occurred during AI code review: {exc}",
+                    status=CHUNK_STATUS_FAILED,
+                )
+
+            last_status = CHUNK_STATUS_FAILED
+            last_review_text = f"Error occurred during AI code review: {exc}"
+
+            if attempt < max_attempts:
+                print(f"[CHUNK {chunk.chunk_id}] Temporary error on attempt {attempt}: {exc}. Retrying...")
+                delay = retry_delay * (2 ** (attempt - 1))
+                if delay > 0:
+                    time.sleep(delay)
+                continue
+            else:
+                print(f"[CHUNK {chunk.chunk_id}] All {max_attempts} attempts failed: {exc}")
+                return ReviewResult(
+                    last_review_text,
+                    status=CHUNK_STATUS_FAILED,
+                )
+
+    return ReviewResult(
+        last_review_text or f"No valid review generated after {max_attempts} attempts.",
+        status=last_status,
+    )
 
 
 # ---------------------------------------------------------------------
@@ -1191,10 +1317,15 @@ def execute_chunked_review(
             "\n[CHUNK MANAGER] No review chunks could be generated."
         )
 
-        return ReviewResult(
+        res = ReviewResult(
             "No review generated.",
             status="incomplete",
         )
+        pr_cov, f_covs = calculate_review_coverage(changed_files, [])
+        res.coverage = pr_cov
+        res.file_coverage = f_covs
+        res.chunk_results = []
+        return res
 
     total_chunks = len(chunks)
 
@@ -1299,7 +1430,7 @@ def execute_chunked_review(
             chunk_result_dicts[index] = {
                 "chunk_id": chunk.chunk_id,
                 "file": chunk.file_path,
-                "status": "incomplete",
+                "status": CHUNK_STATUS_INCOMPLETE,
                 "review": "The chunk did not produce a result.",
             }
 
@@ -1308,6 +1439,12 @@ def execute_chunked_review(
         for item in chunk_result_dicts
         if item is not None
     ]
+
+    # Calculate file-level and PR-level coverage
+    pr_coverage, file_coverages = calculate_review_coverage(
+        changed_files=changed_files,
+        chunk_results=complete_result_list,
+    )
 
     # Aggregate findings and notices from all chunk results.
     aggregated_review = aggregate_reviews(
@@ -1329,12 +1466,12 @@ def execute_chunked_review(
     )
 
     has_failed = any(
-        item["status"] == "failed"
+        str(item.get("status", "")).upper() == CHUNK_STATUS_FAILED
         for item in complete_result_list
     )
 
     has_incomplete = any(
-        item["status"] != "completed"
+        str(item.get("status", "")).upper() not in SUCCESSFUL_CHUNK_STATUSES
         for item in complete_result_list
     )
 
@@ -1363,7 +1500,161 @@ def execute_chunked_review(
         "of all chunk reviews.\n"
     )
 
-    return ReviewResult(
+    res = ReviewResult(
         aggregated_review,
         status=overall_status,
     )
+    res.coverage = pr_coverage
+    res.file_coverage = file_coverages
+    res.chunk_results = complete_result_list
+
+    return res
+
+
+# ---------------------------------------------------------------------
+# Coverage tracking helpers
+# ---------------------------------------------------------------------
+
+def calculate_review_coverage(
+    changed_files: List[str],
+    chunk_results: List[Dict[str, Any]],
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """
+    Calculate file-level and PR-level review coverage.
+
+    Returns:
+        (pr_coverage, file_coverages)
+    """
+    file_map: Dict[str, Dict[str, Any]] = {}
+
+    for f in changed_files:
+        norm = _normalize_path(f)
+        if norm and norm not in file_map:
+            file_map[norm] = {
+                "file": norm,
+                "chunks_generated": 0,
+                "chunks_succeeded": 0,
+                "chunks_incomplete": 0,
+                "chunks_failed": 0,
+                "status": "NOT_REVIEWED",
+            }
+
+    for item in chunk_results:
+        f_path = _normalize_path(item.get("file", ""))
+        status = str(item.get("status", "")).upper()
+        if f_path not in file_map:
+            file_map[f_path] = {
+                "file": f_path,
+                "chunks_generated": 0,
+                "chunks_succeeded": 0,
+                "chunks_incomplete": 0,
+                "chunks_failed": 0,
+                "status": "NOT_REVIEWED",
+            }
+
+        rec = file_map[f_path]
+        rec["chunks_generated"] += 1
+        if status in SUCCESSFUL_CHUNK_STATUSES:
+            rec["chunks_succeeded"] += 1
+        elif status == CHUNK_STATUS_INCOMPLETE:
+            rec["chunks_incomplete"] += 1
+        elif status == CHUNK_STATUS_FAILED:
+            rec["chunks_failed"] += 1
+        else:
+            rec["chunks_incomplete"] += 1
+
+    file_coverages = []
+    for rec in file_map.values():
+        gen = rec["chunks_generated"]
+        succ = rec["chunks_succeeded"]
+        inc = rec["chunks_incomplete"]
+        fail = rec["chunks_failed"]
+
+        if gen > 0 and succ == gen:
+            rec["status"] = "FULLY_REVIEWED"
+        elif succ > 0 and (inc > 0 or fail > 0):
+            rec["status"] = "PARTIALLY_REVIEWED"
+        else:
+            rec["status"] = "NOT_REVIEWED"
+
+        file_coverages.append(rec)
+
+    total_files = len(file_coverages)
+    files_fully = sum(1 for r in file_coverages if r["status"] == "FULLY_REVIEWED")
+    files_partially = sum(1 for r in file_coverages if r["status"] == "PARTIALLY_REVIEWED")
+    files_not = sum(1 for r in file_coverages if r["status"] == "NOT_REVIEWED")
+
+    total_chunks = len(chunk_results)
+    chunks_succeeded = sum(
+        1 for r in chunk_results
+        if str(r.get("status", "")).upper() in SUCCESSFUL_CHUNK_STATUSES
+    )
+    chunks_incomplete = sum(
+        1 for r in chunk_results
+        if str(r.get("status", "")).upper() == CHUNK_STATUS_INCOMPLETE
+    )
+    chunks_failed = sum(
+        1 for r in chunk_results
+        if str(r.get("status", "")).upper() == CHUNK_STATUS_FAILED
+    )
+
+    if total_files > 0 and files_fully == total_files:
+        pr_status = "FULLY_REVIEWED"
+    elif files_fully > 0 or files_partially > 0:
+        pr_status = "PARTIALLY_REVIEWED"
+    else:
+        pr_status = "NOT_REVIEWED"
+
+    pr_coverage = {
+        "total_files": total_files,
+        "files_fully_reviewed": files_fully,
+        "files_partially_reviewed": files_partially,
+        "files_not_reviewed": files_not,
+        "total_chunks": total_chunks,
+        "chunks_succeeded": chunks_succeeded,
+        "chunks_incomplete": chunks_incomplete,
+        "chunks_failed": chunks_failed,
+        "review_status": pr_status,
+    }
+
+    return pr_coverage, file_coverages
+
+
+def format_coverage_section(
+    pr_coverage: Dict[str, Any],
+    file_coverages: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """Format a compact Markdown coverage summary for the PR review."""
+    total_files = pr_coverage.get("total_files", 0)
+    files_fully = pr_coverage.get("files_fully_reviewed", 0)
+    files_partially = pr_coverage.get("files_partially_reviewed", 0)
+    files_not = pr_coverage.get("files_not_reviewed", 0)
+    total_chunks = pr_coverage.get("total_chunks", 0)
+    chunks_succ = pr_coverage.get("chunks_succeeded", 0)
+    chunks_inc = pr_coverage.get("chunks_incomplete", 0)
+    chunks_fail = pr_coverage.get("chunks_failed", 0)
+    status_raw = pr_coverage.get("review_status", "FULLY_REVIEWED")
+    status_display = status_raw.replace("_", " ").title()
+
+    lines = [
+        "### 📊 Review Coverage\n",
+        f"- **Files:** {total_files} total ({files_fully} fully reviewed, {files_partially} partially reviewed, {files_not} not reviewed)",
+        f"- **Chunks:** {total_chunks} total ({chunks_succ} completed, {chunks_inc} incomplete, {chunks_fail} failed)",
+        f"- **Coverage Status:** {status_display}",
+    ]
+
+    if file_coverages:
+        flagged_files = [
+            fc for fc in file_coverages
+            if fc.get("status") in {"PARTIALLY_REVIEWED", "NOT_REVIEWED"}
+        ]
+        if flagged_files:
+            lines.append("\n*Files with incomplete or partial review:*")
+            for fc in flagged_files:
+                f_name = fc.get("file", "unknown")
+                f_stat = fc.get("status", "").replace("_", " ").title()
+                succ = fc.get("chunks_succeeded", 0)
+                gen = fc.get("chunks_generated", 0)
+                lines.append(f"- `{f_name}`: {f_stat} ({succ}/{gen} chunks completed)")
+
+    return "\n".join(lines)

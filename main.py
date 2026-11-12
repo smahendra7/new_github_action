@@ -5,6 +5,7 @@ import hashlib
 import os
 import re
 import shutil
+import time
 
 from fastapi import FastAPI, Request
 
@@ -38,7 +39,10 @@ from github.reviewer_manager import (
 from ai.prompt_builder import build_review_prompt
 from ai.reviewer import ReviewResult, review_code
 from ai.description_validator import validate_pr_description
-from ai.comment_validator import validate_code_comments
+from ai.comment_validator import (
+    validate_code_comments,
+    _is_accurate_comment,
+)
 from ai.description_code_match_validator import (
     validate_description_matches_code,
 )
@@ -55,6 +59,12 @@ from ai.chunk_manager import (
     execute_chunked_review,
     parse_diff_by_file,
     parse_full_code_files,
+    calculate_review_coverage,
+    format_coverage_section,
+    CHUNK_STATUS_COMPLETED_WITH_FINDINGS,
+    CHUNK_STATUS_COMPLETED_NO_ISSUES,
+    CHUNK_STATUS_INCOMPLETE,
+    CHUNK_STATUS_FAILED,
 )
 
 from ai.context_extractor import (
@@ -254,6 +264,13 @@ def _build_validation_section(
 
         for item in comment_warnings:
 
+            classification = str(item.get("classification", "")).strip().upper()
+            reason = str(item.get("reason", "")).strip()
+
+            # Critical rule: ACCURATE must always result in no warning, no suggested correction, and no issue.
+            if _is_accurate_comment(classification, reason):
+                continue
+
             comment_lines = [
                 "### ⚠️ Code Comment needs improvement\n",
                 f"**File:** `{item.get('file', 'Unknown')}`\n"
@@ -273,6 +290,12 @@ def _build_validation_section(
             blocks.append(
                 "\n".join(comment_lines).strip()
             )
+
+    if not blocks:
+        return (
+            "## PR Validation\n\n"
+            "✅ No validation issues found."
+        )
 
     joined_blocks = "\n\n---\n\n".join(blocks)
 
@@ -384,6 +407,7 @@ def _format_review(review_text: str) -> str:
 def _build_combined_comment(
     validation_section: str,
     review_text: str,
+    coverage_section: str = "",
 ) -> str:
 
     formatted_review = (
@@ -398,9 +422,19 @@ def _build_combined_comment(
         "---",
         "",
         "## AI Code Review",
-        "",
-        formatted_review,
     ]
+
+    if coverage_section:
+        parts.extend([
+            "",
+            coverage_section,
+        ])
+
+    if formatted_review:
+        parts.extend([
+            "",
+            formatted_review,
+        ])
 
     return "\n".join(parts)
 
@@ -1271,14 +1305,23 @@ def process_pr_event(
         # Step 11: Generate comment suggestions
         # ---------------------------------------------------
 
-        if raw_mismatches:
+        # Filter out accurate comments to prevent false positives
+        valid_mismatches = [
+            m for m in (raw_mismatches or [])
+            if not _is_accurate_comment(
+                m.get("classification", ""),
+                m.get("reason", ""),
+            )
+        ]
+
+        if valid_mismatches:
 
             print(
-                f"\n[VALIDATION WARNING] {len(raw_mismatches)} "
+                f"\n[VALIDATION WARNING] {len(valid_mismatches)} "
                 "code comment mismatch(es) found."
             )
 
-            for mismatch in raw_mismatches:
+            for mismatch in valid_mismatches:
 
                 try:
                     suggestion = generate_comment_suggestion(
@@ -1398,6 +1441,8 @@ def process_pr_event(
                 review_status, review_text = _get_review_result(
                     review_output
                 )
+                pr_coverage = getattr(review_output, "coverage", None)
+                file_coverages = getattr(review_output, "file_coverage", None)
 
             except Exception as error:
 
@@ -1409,6 +1454,14 @@ def process_pr_event(
 
                 review_text = (
                     f"Error occurred during AI code review: {error}"
+                )
+                pr_coverage = None
+                file_coverages = None
+
+            if not pr_coverage:
+                pr_coverage, file_coverages = calculate_review_coverage(
+                    changed_files,
+                    [{"file": f, "status": review_status, "review": review_text} for f in changed_files]
                 )
 
             review = aggregate_reviews(
@@ -1433,6 +1486,7 @@ def process_pr_event(
             )
 
             file_review_results = []
+            all_chunk_records = []
 
             for file_path in changed_files:
 
@@ -1463,6 +1517,16 @@ def process_pr_event(
                             ),
                         }
                     )
+                    all_chunk_records.append(
+                        {
+                            "file": file_path,
+                            "status": CHUNK_STATUS_INCOMPLETE,
+                            "review": (
+                                "Exact file diff was not found. "
+                                "This file was not reviewed."
+                            ),
+                        }
+                    )
 
                     continue
 
@@ -1480,6 +1544,16 @@ def process_pr_event(
                         {
                             "file": file_path,
                             "status": "incomplete",
+                            "review": (
+                                "The exact file diff was empty. "
+                                "This file was not reviewed."
+                            ),
+                        }
+                    )
+                    all_chunk_records.append(
+                        {
+                            "file": file_path,
+                            "status": CHUNK_STATUS_INCOMPLETE,
                             "review": (
                                 "The exact file diff was empty. "
                                 "This file was not reviewed."
@@ -1506,6 +1580,16 @@ def process_pr_event(
                         {
                             "file": file_path,
                             "status": "incomplete",
+                            "review": (
+                                "Exact source code was not found. "
+                                "This file was not reviewed."
+                            ),
+                        }
+                    )
+                    all_chunk_records.append(
+                        {
+                            "file": file_path,
+                            "status": CHUNK_STATUS_INCOMPLETE,
                             "review": (
                                 "Exact source code was not found. "
                                 "This file was not reviewed."
@@ -1564,6 +1648,16 @@ def process_pr_event(
                             ),
                         }
                     )
+                    all_chunk_records.append(
+                        {
+                            "file": file_path,
+                            "status": CHUNK_STATUS_INCOMPLETE,
+                            "review": (
+                                "Source context could not be extracted. "
+                                "This file was not reviewed."
+                            ),
+                        }
+                    )
 
                     continue
 
@@ -1609,28 +1703,58 @@ def process_pr_event(
                         "=================================================\n"
                     )
 
-                    try:
-                        review_output = review_code(
-                            file_prompt
-                        )
+                    max_attempts = 3
+                    retry_delay = float(os.environ.get("CODEGATE_RETRY_DELAY", "0.5"))
+                    status = "failed"
+                    review_text = "No review generated."
 
-                        status, review_text = _get_review_result(
-                            review_output
-                        )
+                    for attempt in range(1, max_attempts + 1):
+                        try:
+                            review_output = review_code(
+                                file_prompt
+                            )
 
-                    except Exception as error:
+                            status, review_text = _get_review_result(
+                                review_output
+                            )
+                            if status in {"completed", CHUNK_STATUS_COMPLETED_WITH_FINDINGS, CHUNK_STATUS_COMPLETED_NO_ISSUES}:
+                                break
 
-                        print(
-                            f"[REVIEW ERROR] Exception during review "
-                            f"for {file_path}: {error}"
-                        )
+                            if attempt < max_attempts:
+                                delay = retry_delay * (2 ** (attempt - 1))
+                                if delay > 0:
+                                    time.sleep(delay)
+                                continue
+                            else:
+                                if not review_text or review_text == "No review generated.":
+                                    review_text = f"No valid review generated after {max_attempts} attempts."
+                                break
 
-                        status = "failed"
+                        except Exception as error:
+                            if attempt < max_attempts:
+                                delay = retry_delay * (2 ** (attempt - 1))
+                                if delay > 0:
+                                    time.sleep(delay)
+                                continue
+                            else:
+                                print(
+                                    f"[REVIEW ERROR] Exception during review "
+                                    f"for {file_path}: {error}"
+                                )
+                                status = "failed"
+                                review_text = (
+                                    "Error occurred during AI code review: "
+                                    f"{error}"
+                                )
+                                break
 
-                        review_text = (
-                            "Error occurred during AI code review: "
-                            f"{error}"
-                        )
+                    all_chunk_records.append(
+                        {
+                            "file": file_path,
+                            "status": status,
+                            "review": review_text,
+                        }
+                    )
 
                 # ---------------------------------------------------
                 # Large individual file review
@@ -1662,6 +1786,13 @@ def process_pr_event(
                             "Could not construct source code for "
                             "individual file chunking."
                         )
+                        all_chunk_records.append(
+                            {
+                                "file": file_path,
+                                "status": CHUNK_STATUS_INCOMPLETE,
+                                "review": review_text,
+                            }
+                        )
 
                     else:
 
@@ -1676,6 +1807,17 @@ def process_pr_event(
                             status, review_text = _get_review_result(
                                 review_output
                             )
+                            chunks = getattr(review_output, "chunk_results", None)
+                            if chunks:
+                                all_chunk_records.extend(chunks)
+                            else:
+                                all_chunk_records.append(
+                                    {
+                                        "file": file_path,
+                                        "status": status,
+                                        "review": review_text,
+                                    }
+                                )
 
                         except Exception as error:
 
@@ -1689,6 +1831,13 @@ def process_pr_event(
                             review_text = (
                                 "Error occurred during AI code review: "
                                 f"{error}"
+                            )
+                            all_chunk_records.append(
+                                {
+                                    "file": file_path,
+                                    "status": CHUNK_STATUS_FAILED,
+                                    "review": review_text,
+                                }
                             )
 
                 # ---------------------------------------------------
@@ -1715,6 +1864,11 @@ def process_pr_event(
             # Aggregate all file results
             # ---------------------------------------------------
 
+            pr_coverage, file_coverages = calculate_review_coverage(
+                changed_files,
+                all_chunk_records,
+            )
+
             review = aggregate_reviews(
                 file_review_results
             )
@@ -1728,6 +1882,11 @@ def process_pr_event(
             desc_reason=desc_reason,
             desc_suggestion=desc_suggestion,
             comment_warnings=comment_warnings,
+        )
+
+        coverage_section = format_coverage_section(
+            pr_coverage,
+            file_coverages,
         )
 
         if skipped_files:
@@ -1745,6 +1904,7 @@ def process_pr_event(
         combined_comment = _build_combined_comment(
             validation_section=validation_section,
             review_text=review,
+            coverage_section=coverage_section,
         )
 
         print(
@@ -1787,9 +1947,20 @@ def process_pr_event(
                 validation_passed=True,
             )
 
+        pr_review_status = pr_coverage.get("review_status", "FULLY_REVIEWED")
+        if pr_review_status == "FULLY_REVIEWED":
+            review_message = "review_completed"
+        elif pr_review_status == "PARTIALLY_REVIEWED":
+            review_message = "review_partially_completed"
+        else:
+            review_message = "review_not_completed"
+
         return {
             "status": "success",
-            "message": "review_completed",
+            "message": review_message,
+            "review_status": pr_review_status,
+            "coverage": pr_coverage,
+            "file_coverage": file_coverages,
             "changed_files": changed_files,
             "skipped_files": [
                 {"file": file_path, "reason": reason}
