@@ -532,3 +532,197 @@ class TestRemoveMalformedTables:
         # Valid tables remain intact
         assert "| 1 | 2 |" in result
         assert "| p | q |" in result
+
+
+
+# ---------------------------------------------------------------------------
+# Tests for Ambiguous Review Notice and Double Aggregation Fixes
+# ---------------------------------------------------------------------------
+
+class TestReviewNoticeAndAggregationFixes:
+    """Regression tests for the 9 areas requested for CodeGate review notices."""
+
+    # 1. Double aggregation
+    def test_step13_chunked_review_avoids_double_aggregation(self):
+        """execute_chunked_review output is used directly and not re-aggregated as 'Overall PR review'."""
+        from unittest.mock import patch, MagicMock
+        from main import process_pr_event
+        from ai.reviewer import ReviewResult
+
+        chunk_result = ReviewResult(
+            "**Issue:** Memory leak in worker\n**File:** worker.py\n**Line:** 20\n\n"
+            "**Code:**\n```python\nworker.run()\n```\n\n**Reason:** Leak.\n**Suggestion:** Fix.",
+            status="completed",
+        )
+        chunk_result.coverage = {
+            "total_files": 1,
+            "files_fully_reviewed": 1,
+            "files_partially_reviewed": 0,
+            "files_not_reviewed": 0,
+            "coverage_percentage": 100.0,
+            "coverage_status": "Fully Reviewed",
+            "diagnostics": [],
+        }
+        chunk_result.file_coverage = [
+            {"file": "worker.py", "chunks_total": 1, "chunks_completed": 1, "status": "FULLY_REVIEWED"}
+        ]
+        chunk_result.chunk_results = [
+            {"chunk_id": 1, "file": "worker.py", "status": "COMPLETED_WITH_FINDINGS", "review": str(chunk_result)}
+        ]
+
+        with patch("main.get_pr_details", return_value=("feat: large", "Body")), \
+             patch("main.clone_repository"), \
+             patch("main.get_pr_changed_files", return_value=["worker.py"]), \
+             patch("main.get_diff", return_value="diff --git a/worker.py b/worker.py\n+large"), \
+             patch("main.extract_full_code", return_value="FILE: worker.py\n" + ("L1: pass\n" * 20000)), \
+             patch("main.extract_change_aware_context", return_value=("code", "context")), \
+             patch("main.count_tokens", return_value=150000), \
+             patch("main.validate_pr_description", return_value={"is_valid": True, "reason": None}), \
+             patch("main.validate_description_matches_code", return_value={"is_valid": True, "reason": None}), \
+             patch("main.validate_code_comments", return_value=[]), \
+             patch("main.execute_chunked_review", return_value=chunk_result), \
+             patch("main.post_pr_comment") as mock_post:
+
+            payload = {
+                "action": "opened",
+                "pull_request": {"number": 100, "body": "valid body"},
+                "repository": {"full_name": "owner/repo", "name": "repo"},
+            }
+
+            result = process_pr_event(payload, "pull_request", "opened", "", "")
+
+            assert result["status"] == "success"
+            # Must NOT contain the synthetic "Overall PR review" label anywhere
+            assert mock_post.call_count == 1
+            posted = mock_post.call_args[0][2]
+            assert "Overall PR review" not in posted
+            assert "Memory leak in worker" in posted
+            assert "(ambiguous)" not in posted
+
+    # 2. Structured issue responses
+    def test_structured_issue_accepted_as_completed_with_findings(self):
+        """_infer_review_status recognizes structured **Issue:** blocks."""
+        from ai.chunk_manager import _infer_review_status, CHUNK_STATUS_COMPLETED_WITH_FINDINGS
+        from ai.reviewer import ReviewResult
+
+        text = (
+            "**Issue:** Unhandled exception\n**File:** app.py\n**Line:** 5\n\n"
+            "**Code:**\n```python\nrisky_call()\n```\n\n**Reason:** Crash.\n**Suggestion:** Try/except."
+        )
+        res = ReviewResult(text, status="completed")
+        status, review_text = _infer_review_status(res)
+        assert status == CHUNK_STATUS_COMPLETED_WITH_FINDINGS
+        assert "Unhandled exception" in review_text
+
+    # 3. Exact "No issues found." responses
+    def test_exact_no_issues_found_accepted_as_completed_no_issues(self):
+        """_infer_review_status recognizes clean confirmation 'No issues found.'"""
+        from ai.chunk_manager import _infer_review_status, CHUNK_STATUS_COMPLETED_NO_ISSUES
+        from ai.reviewer import ReviewResult
+
+        res = ReviewResult("No issues found.", status="completed")
+        status, review_text = _infer_review_status(res)
+        assert status == CHUNK_STATUS_COMPLETED_NO_ISSUES
+        assert review_text == "No issues found."
+
+    # 4. Conversational preamble without findings
+    def test_conversational_preamble_alone_classified_as_incomplete(self):
+        """Conversational preamble alone is NEVER classified as COMPLETED_NO_ISSUES."""
+        from ai.chunk_manager import _infer_review_status, CHUNK_STATUS_INCOMPLETE
+        from ai.reviewer import ReviewResult
+
+        preamble = (
+            "I'll review the changed code in the PR diff and identify issues "
+            "that are directly attributable to the changes..."
+        )
+        res = ReviewResult(preamble, status="completed")
+        status, review_text = _infer_review_status(res)
+        assert status == CHUNK_STATUS_INCOMPLETE
+
+    # 5. Preamble followed by "No issues found."
+    def test_preamble_followed_by_no_issues_found_is_clean(self):
+        """Preamble followed by explicit 'No issues found.' is stripped and accepted as clean."""
+        from ai.chunk_manager import _infer_review_status, CHUNK_STATUS_COMPLETED_NO_ISSUES
+        from ai.result_aggregator import _is_explicitly_clean, aggregate_reviews
+        from ai.reviewer import ReviewResult
+
+        text = (
+            "I'll review the changed code in the PR diff and identify issues "
+            "that are directly attributable to the changes.\n\nNo issues found."
+        )
+        assert _is_explicitly_clean(text) is True
+
+        res = ReviewResult(text, status="completed")
+        status, review_text = _infer_review_status(res)
+        assert status == CHUNK_STATUS_COMPLETED_NO_ISSUES
+        assert "No issues found." in review_text
+
+        # In aggregation, does NOT produce an ambiguous notice
+        agg = aggregate_reviews([{"file": "mod.py", "status": status, "review": review_text}])
+        assert "(ambiguous)" not in agg
+        assert "No issues found." in agg
+
+    # 6. Arbitrary explanatory text
+    def test_arbitrary_explanatory_text_not_clean_and_marked_incomplete(self):
+        """Arbitrary explanatory commentary is not clean and classified as incomplete."""
+        from ai.chunk_manager import _infer_review_status, CHUNK_STATUS_INCOMPLETE
+        from ai.result_aggregator import _is_explicitly_clean, aggregate_reviews
+        from ai.reviewer import ReviewResult
+
+        text = "This pull request refactors the database schema and introduces three new tables."
+        assert _is_explicitly_clean(text) is False
+
+        res = ReviewResult(text, status="completed")
+        status, review_text = _infer_review_status(res)
+        assert status == CHUNK_STATUS_INCOMPLETE
+
+        # If aggregated as completed, aggregate_reviews flags as ambiguous
+        agg = aggregate_reviews([{"file": "db.py", "status": "completed", "review": text}])
+        assert "(ambiguous)" in agg
+
+    # 7. Incomplete responses
+    def test_incomplete_responses_classified_as_incomplete(self):
+        """Empty or 'No review generated.' responses are classified as INCOMPLETE."""
+        from ai.chunk_manager import _infer_review_status, CHUNK_STATUS_INCOMPLETE
+        from ai.reviewer import ReviewResult
+
+        for val in ["", "No review generated.", "   "]:
+            res = ReviewResult(val, status="incomplete")
+            status, _ = _infer_review_status(res)
+            assert status == CHUNK_STATUS_INCOMPLETE
+
+    # 8. File-level coverage preservation
+    def test_file_level_coverage_preserved_in_chunked_review(self):
+        """File-level coverage is preserved when execute_chunked_review runs."""
+        from ai.chunk_manager import calculate_review_coverage
+
+        changed_files = ["service.py", "utils.py"]
+        chunk_results = [
+            {"chunk_id": 1, "file": "service.py", "status": "COMPLETED_NO_ISSUES", "review": "No issues found."},
+            {"chunk_id": 2, "file": "utils.py", "status": "COMPLETED_WITH_FINDINGS", "review": "**Issue:** Bug\n**File:** utils.py\n**Line:** 1"},
+        ]
+        pr_cov, file_covs = calculate_review_coverage(changed_files, chunk_results)
+        assert pr_cov["files_fully_reviewed"] == 2
+        assert pr_cov["review_status"] == "FULLY_REVIEWED"
+        assert len(file_covs) == 2
+        assert file_covs[0]["file"] == "service.py"
+        assert file_covs[1]["file"] == "utils.py"
+
+    # 9. Failed chunks remaining marked incomplete
+    def test_failed_chunks_remain_disclosed_in_notices(self):
+        """Failed chunks remain marked incomplete and are disclosed in Review Notices."""
+        from ai.result_aggregator import aggregate_reviews
+
+        results = [
+            {"chunk_id": 1, "file": "clean.py", "status": "COMPLETED_NO_ISSUES", "review": "No issues found."},
+            {
+                "chunk_id": 2,
+                "file": "broken.py",
+                "status": "INCOMPLETE",
+                "review": "No valid review generated after 3 attempts. Last status: INCOMPLETE_OR_MALFORMED.",
+            },
+        ]
+        agg = aggregate_reviews(results)
+        assert "### ⚠️ Review Notices" in agg
+        assert "broken.py" in agg
+        assert "(incomplete)" in agg

@@ -251,7 +251,7 @@ _CLEAN_STATEMENT_PATTERNS = [
         r"(?:issues?|bugs?|problems?|defects?|"
         r"vulnerabilit(?:y|ies)|concerns?)"
         r"(?: found)?"
-        r"(?: in (?:this|the) (?:change|code|diff|pr|patch))?",
+        r"(?: in (?:this|the) (?:change|code|diff|pr|patch|chunk|file))?",
         re.IGNORECASE,
     ),
 
@@ -267,7 +267,7 @@ _CLEAN_STATEMENT_PATTERNS = [
     ),
 
     re.compile(
-        r"(?:(?:the |this )?(?:code|change|changes|pr|diff|patch) )?"
+        r"(?:(?:the |this )?(?:code|change|changes|pr|diff|patch|chunk|file|implementation) )?"
         r"(?:looks|seems) good(?: to me)?",
         re.IGNORECASE,
     ),
@@ -278,7 +278,7 @@ _CLEAN_STATEMENT_PATTERNS = [
     ),
 
     re.compile(
-        r"(?:the |this )?(?:code|review|pr|diff|changes?) "
+        r"(?:the |this )?(?:code|review|pr|diff|changes?|chunk|file|implementation) "
         r"(?:is|are|looks?) clean",
         re.IGNORECASE,
     ),
@@ -296,6 +296,36 @@ _CLEAN_SENTENCE_SPLIT = re.compile(
 )
 
 _CLEAN_MAX_SENTENCE_WORDS = 20
+
+_KNOWN_PREAMBLE_PATTERNS = [
+    re.compile(
+        r"^\s*(?:sure,?\s*)?"
+        r"(?:i(?:\'ll|\s+will|\s+have)?\s+)?(?:review(?:ed|ing)?|analyz(?:ed|ing)?|examin(?:ed|ing)?|"
+        r"look(?:ed|ing)?\s+at)\s+"
+        r"(?:the\s+)?(?:provided\s+|changed\s+|pr\s+)*(?:code|diff|changes?|files?|patch)"
+        r"[^\n.!?]*(?:and\s+identify\s+issues[^\n.!?]*)?[.!?:]*\s*",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+    re.compile(
+        r"^\s*(?:here (?:is|are) (?:my |the )?(?:review|findings|analysis|summary)"
+        r"(?: of (?:the )?(?:changes?|diff|code))?[.!?:]*\s*)",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+    re.compile(
+        r"^\s*(?:based on (?:the )?(?:provided )?(?:diff|code|changes?)[^\n.!?]*[.!?:]*\s*)",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+]
+
+
+def _strip_known_preamble(text: str) -> str:
+    """Remove known conversational preambles while leaving actual content intact."""
+    if not text:
+        return ""
+    cleaned = text
+    for pattern in _KNOWN_PREAMBLE_PATTERNS:
+        cleaned = pattern.sub("", cleaned)
+    return cleaned.strip()
 
 
 def _strip_markdown_wrappers(text: str) -> str:
@@ -345,7 +375,14 @@ def _is_explicitly_clean(text: str) -> bool:
     ):
         return False
 
-    sentences = _CLEAN_SENTENCE_SPLIT.split(text)
+    # Strip known conversational preambles before checking clean statements.
+    cleaned = _strip_known_preamble(text)
+    if not cleaned or not cleaned.strip():
+        # A response consisting ONLY of preamble with no findings
+        # and no clean confirmation is NOT a clean review.
+        return False
+
+    sentences = _CLEAN_SENTENCE_SPLIT.split(cleaned)
 
     found_clean_statement = False
 
@@ -588,8 +625,12 @@ def _aggregate_file_results(
         # Only completed results can qualify as clean.
         if is_completed:
 
-            if status == "completed_no_issues" or _is_explicitly_clean(review_text):
-                clean_non_issues.append(review_text or "No issues found.")
+            if _is_explicitly_clean(review_text):
+                clean_text = _strip_known_preamble(review_text) or "No issues found."
+                clean_non_issues.append(clean_text)
+
+            elif status == "completed_no_issues" and not review_text:
+                clean_non_issues.append("No issues found.")
 
             else:
                 collapsed = " ".join(

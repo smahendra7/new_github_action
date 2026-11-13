@@ -37,6 +37,7 @@ from ai.result_aggregator import (
     _extract_issue_blocks,
     _bold_labels,
     _is_explicitly_clean,
+    _strip_known_preamble,
 )
 from ai.reviewer import ReviewResult, review_code
 
@@ -1221,23 +1222,22 @@ def _infer_review_status(
     if raw_status in {"INCOMPLETE"}:
         return CHUNK_STATUS_INCOMPLETE, review_text
 
-    # Check for structured findings
+    # 1. Accept structured findings as valid reviews
     formatted_text = _bold_labels(review_text)
     issue_blocks = _extract_issue_blocks(formatted_text)
     if issue_blocks or re.search(r"(?im)^\s*\*\*Issue:\*\*", formatted_text):
         return CHUNK_STATUS_COMPLETED_WITH_FINDINGS, review_text
 
-    if (
-        _is_explicitly_clean(review_text)
-        or "no issues" in review_text.lower()
-        or "looks good" in review_text.lower()
-    ):
-        return CHUNK_STATUS_COMPLETED_NO_ISSUES, review_text
+    # 2. Accept explicitly clean responses (e.g. "No issues found.")
+    if _is_explicitly_clean(review_text):
+        clean_text = _strip_known_preamble(review_text) or "No issues found."
+        return CHUNK_STATUS_COMPLETED_NO_ISSUES, clean_text
 
-    if raw_status in {"COMPLETED"}:
-        return CHUNK_STATUS_COMPLETED_NO_ISSUES, review_text
-
-    return CHUNK_STATUS_COMPLETED_NO_ISSUES, review_text
+    # 3. Arbitrary conversational text, preamble alone, or unstructured
+    # responses must NEVER be classified as COMPLETED_NO_ISSUES.
+    # Treat as INCOMPLETE so the chunk retry mechanism can attempt
+    # to obtain a valid structured or clean review.
+    return CHUNK_STATUS_INCOMPLETE, review_text
 
 
 # ---------------------------------------------------------------------

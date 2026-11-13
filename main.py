@@ -1487,6 +1487,10 @@ def process_pr_event(
                 )
                 pr_coverage = getattr(review_output, "coverage", None)
                 file_coverages = getattr(review_output, "file_coverage", None)
+                # execute_chunked_review() already aggregates all chunk reviews
+                # and preserves file/chunk coverage and notices. Do not re-aggregate
+                # under a synthetic "Overall PR review" label.
+                review = review_text
 
             except Exception as error:
 
@@ -1501,22 +1505,22 @@ def process_pr_event(
                 )
                 pr_coverage = None
                 file_coverages = None
+                review = aggregate_reviews(
+                    [
+                        {
+                            "file": f,
+                            "status": review_status,
+                            "review": review_text,
+                        }
+                        for f in changed_files
+                    ]
+                )
 
             if not pr_coverage:
                 pr_coverage, file_coverages = calculate_review_coverage(
                     changed_files,
                     [{"file": f, "status": review_status, "review": review_text} for f in changed_files]
                 )
-
-            review = aggregate_reviews(
-                [
-                    {
-                        "file": "Overall PR review",
-                        "status": review_status,
-                        "review": review_text,
-                    }
-                ]
-            )
 
         # ---------------------------------------------------
         # Step 14: Normal sequential file-by-file review

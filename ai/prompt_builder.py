@@ -26,6 +26,14 @@ def build_review_prompt(
 
     return f"""You are a senior code reviewer. Your task is to review the changed code provided below and report only real, evidence-based issues introduced by or directly associated with the developer's changes.
 
+CRITICAL FORMAT RULE — STRICT OUTPUT ONLY (NO CONVERSATIONAL FILLER):
+- Do NOT include ANY conversational preamble, introduction, acknowledgement, or filler.
+- Never write introductory phrases such as "I'll review the changed code...", "I will review...", "Sure, here is the review...", "Looking at the changes...", "Here is my analysis...", or any conversational opening.
+- Never write conversational summaries, concluding commentary, notes, or explanations outside the required issue format.
+- Output MUST contain ONLY structured findings in the exact format below, OR if no real evidence-based issues exist, output EXACTLY:
+  No issues found.
+  and nothing else.
+
 CRITICAL RULE — REVIEW SCOPE IS STRICTLY LIMITED TO THE PR DIFF:
 The PR DIFF represents the developer's actual changes and is the AUTHORITATIVE REVIEW SCOPE.
 The FULL FILE CONTEXT is provided solely for contextual understanding (surrounding functions, classes, imports, variables, function relationships, and interactions).
@@ -135,6 +143,7 @@ However, whenever a comment or docstring exists and is relevant to the code bein
    - If one or more real, evidence-based issues are found, report them using the existing required output format.
    - If the review is completed and no real, evidence-based issues are found, return exactly:
      No issues found.
+   - Do NOT add any preamble, acknowledgment, greeting, or explanation before or after "No issues found."
    - Never return an empty response after completing a review.
    - Do not return "No issues found." if the review could not be completed or the provided input is insufficient to perform the review.
 
